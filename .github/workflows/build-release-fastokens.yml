@@ -37,6 +37,7 @@ jobs:
   build-package:
     uses: ./.github/workflows/build-maturin.yml
     with:
+      folder: python
       publish_pypi: ${{ github.event_name == 'workflow_dispatch' && fromJSON(github.event.inputs.publish) }}
     secrets:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}

@@ -8,6 +8,10 @@ name: build-maturin
 on:
   workflow_call:
     inputs:
+      folder:
+        description: "The folder containing the package to build."
+        required: true
+        type: string
       publish_pypi:
         description: "Whether to publish the package to PyPI."
         required: false
@@ -57,6 +61,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: "false"
@@ -74,6 +79,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         if: ${{ matrix.platform.ft }}
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.13t
           sccache: "false"
@@ -91,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.platform.target }}
-          path: dist
+          path: ${{ inputs.folder }}/dist
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
@@ -114,6 +120,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: "false"
@@ -121,6 +128,7 @@ jobs:
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.13t
           sccache: "false"
@@ -129,7 +137,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
-          path: dist
+          path: ${{ inputs.folder }}/dist
 
   windows:
     runs-on: windows-latest
@@ -142,6 +150,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: x64
           args: --release --out dist --find-interpreter
           sccache: "false"
@@ -149,7 +158,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64
-          path: dist
+          path: ${{ inputs.folder }}/dist
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
@@ -168,12 +177,14 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: "false"
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.13t
           sccache: "false"
@@ -181,7 +192,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
-          path: dist
+          path: ${{ inputs.folder }}/dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -190,13 +201,14 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          working-directory: ${{ inputs.folder }}
           command: sdist
           args: --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
-          path: dist
+          path: ${{ inputs.folder }}/dist
 
   release:
     name: Release
