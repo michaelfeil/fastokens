@@ -15,9 +15,6 @@ pub struct AddedTokens {
     all: AddedTokenMatcher,
     non_special: Option<AddedTokenMatcher>,
     has_special_tokens: bool,
-    /// Token lengths (in bytes) indexed by token ID, for matched tokens only.
-    /// Non-added token IDs map to 0.
-    token_lens: Vec<usize>,
     /// Mapping from token ID to token content string.
     id_to_content: HashMap<u32, String>,
     /// Reverse mapping: token content string → token ID.
@@ -191,9 +188,6 @@ impl AddedTokens {
             return Ok(None);
         }
 
-        let max_id = configs.iter().map(|c| c.id).max().unwrap_or(0);
-        let mut token_lens = vec![0usize; (max_id + 1) as usize];
-
         let mut id_to_content = HashMap::with_capacity(configs.len());
         let mut special_ids = HashSet::new();
 
@@ -202,7 +196,6 @@ impl AddedTokens {
         let patterns: Vec<(&str, u32)> = configs
             .iter()
             .map(|c| {
-                token_lens[c.id as usize] = c.content.len();
                 id_to_content.insert(c.id, c.content.clone());
                 content_to_id.insert(c.content.clone(), c.id);
                 if c.special {
@@ -222,9 +215,6 @@ impl AddedTokens {
             return Ok(None);
         };
         let has_special_tokens = !special_ids.is_empty();
-        // Keep a second matcher only when special tokens must be excluded for
-        // split_special_tokens=true. Tokenizers with no special added tokens
-        // can reuse the full matcher.
         let non_special = if has_special_tokens {
             AddedTokenMatcher::new(non_special_patterns)?
         } else {
@@ -235,7 +225,6 @@ impl AddedTokens {
             all,
             non_special,
             has_special_tokens,
-            token_lens,
             id_to_content,
             content_to_id,
             special_ids,
@@ -314,9 +303,8 @@ impl AddedTokens {
 
 impl fmt::Debug for AddedTokens {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let count = self.token_lens.iter().filter(|&&len| len > 0).count();
         f.debug_struct("AddedTokens")
-            .field("count", &count)
+            .field("count", &self.len())
             .finish()
     }
 }
@@ -561,6 +549,21 @@ mod tests {
         assert_eq!(
             at.split_special_as_text("a<extra>b"),
             vec![Segment::Text("a"), Segment::Token(1), Segment::Text("b")]
+        );
+    }
+
+    #[test]
+    fn split_special_as_text_allows_non_special_match_inside_special_text() {
+        let mut special = make_config(1, "<mask>");
+        special.special = true;
+        let non_special = make_config(2, "ask>");
+        let at = AddedTokens::from_configs(&[special, non_special])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("<mask>"),
+            vec![Segment::Text("<m"), Segment::Token(2)]
         );
     }
 

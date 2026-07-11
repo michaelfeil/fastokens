@@ -869,26 +869,46 @@ mod tests {
         "| col1 | col2 |\n|------|------|\n| a    | b    |",
     ];
 
-    /// Helper: compare both encoding and decoding of every input in `corpus`
-    /// between our tokenizer and the HuggingFace tokenizer for a given model.
+    /// Helper: compare encoding of every input in `corpus` in both default
+    /// and split-special-token modes, and compare decoding of the default IDs.
+    /// Special-token samples from each model are included so split mode covers
+    /// model-specific added-token strings, not just generic text.
     /// Returns a list of failure descriptions (empty = all passed).
     fn compare_encode_decode(model_name: &str, corpus: &[&str]) -> Vec<String> {
-        let hf = tokenizers::Tokenizer::from_pretrained(model_name, None)
+        let mut hf = tokenizers::Tokenizer::from_pretrained(model_name, None)
             .unwrap_or_else(|e| panic!("{model_name}: HF load failed: {e}"));
         let ours = Tokenizer::from_model(model_name)
             .unwrap_or_else(|e| panic!("{model_name}: fastokens load failed: {e}"));
 
+        let special_samples: Vec<String> = ours
+            .added_tokens()
+            .map(|added| {
+                added
+                    .iter()
+                    .filter(|entry| entry.special)
+                    .take(4)
+                    .flat_map(|entry| {
+                        [
+                            entry.content.to_string(),
+                            format!("hello {} world", entry.content),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut failures = Vec::new();
-        for &input in corpus {
+        let mut compare_input = |input: &str, compare_decode: bool| {
+            hf.set_encode_special_tokens(false);
             let hf_enc = hf
                 .encode(input, false)
                 .unwrap_or_else(|e| panic!("{model_name}: HF encode({input:?}): {e}"));
             let hf_ids = hf_enc.get_ids().to_vec();
-            let our_ids = match ours.encode(input) {
+            let our_ids = match ours.encode_with_options(input, false, false) {
                 Ok(ids) => ids,
                 Err(e) => {
                     failures.push(format!("  encode error on {input:?}: {e}"));
-                    continue;
+                    return;
                 }
             };
             if our_ids != hf_ids {
@@ -903,19 +923,45 @@ mod tests {
                 ));
             }
 
-            // Decode comparison (skip empty inputs / empty token sequences).
-            if input.is_empty() || hf_ids.is_empty() {
-                continue;
+            hf.set_encode_special_tokens(true);
+            let hf_split_ids = hf
+                .encode(input, false)
+                .unwrap_or_else(|e| panic!("{model_name}: HF split encode({input:?}): {e}"))
+                .get_ids()
+                .to_vec();
+            let our_split_ids = match ours.encode_with_options(input, false, true) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    failures.push(format!("  split encode error on {input:?}: {e}"));
+                    return;
+                }
+            };
+            if our_split_ids != hf_split_ids {
+                failures.push(format!(
+                    "  split encode mismatch on {input:?}: got {} tokens, expected {}\n\
+                     \x20   ours: {:?}\n\
+                     \x20   hf:   {:?}",
+                    our_split_ids.len(),
+                    hf_split_ids.len(),
+                    &our_split_ids[..our_split_ids.len().min(20)],
+                    &hf_split_ids[..hf_split_ids.len().min(20)],
+                ));
             }
+
+            // Decode comparison (skip empty inputs / empty token sequences).
+            if !compare_decode || input.is_empty() || hf_ids.is_empty() {
+                return;
+            }
+            hf.set_encode_special_tokens(false);
             let hf_decoded = match hf.decode(&hf_ids, false) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(_) => return,
             };
             let our_decoded = match ours.decode(&hf_ids, false) {
                 Ok(d) => d,
                 Err(e) => {
                     failures.push(format!("  decode error on {input:?}: {e}"));
-                    continue;
+                    return;
                 }
             };
             if our_decoded != hf_decoded {
@@ -927,6 +973,13 @@ mod tests {
                     &hf_decoded[..hf_decoded.len().min(100)],
                 ));
             }
+        };
+
+        for &input in corpus {
+            compare_input(input, true);
+        }
+        for input in &special_samples {
+            compare_input(input, false);
         }
         failures
     }
