@@ -40,7 +40,7 @@ def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
         assert tokenizer.encode(text, add_special_tokens=False).ids == encoding.encode(text)
 
 
-def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch) -> None:
+def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch: pytest.MonkeyPatch) -> None:
     encoding = _encoding()
     monkeypatch.setattr(tiktoken, "get_encoding", lambda name: encoding)
 

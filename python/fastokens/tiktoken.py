@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
+
+
+class _MergeCandidate(NamedTuple):
+    rank: int
+    left_rank: int
+    right_rank: int
+    left: bytes
+    right: bytes
 
 
 def _byte_to_unicode() -> dict[int, str]:
@@ -43,7 +51,7 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
         for token, rank in sorted(mergeable_ranks.items(), key=lambda item: item[1])
     }
 
-    merge_candidates: list[tuple[int, int, int, bytes, bytes]] = []
+    merge_candidates: list[_MergeCandidate] = []
     for token, rank in mergeable_ranks.items():
         if len(token) == 1:
             continue
@@ -54,10 +62,22 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
             if left in mergeable_ranks and right in mergeable_ranks:
                 local.append((mergeable_ranks[left], mergeable_ranks[right], left, right))
         local.sort(key=lambda item: (item[0], item[1]))
-        merge_candidates.extend((rank, left_rank, right_rank, left, right) for left_rank, right_rank, left, right in local)
+        merge_candidates.extend(
+            _MergeCandidate(
+                rank=rank,
+                left_rank=left_rank,
+                right_rank=right_rank,
+                left=left,
+                right=right,
+            )
+            for left_rank, right_rank, left, right in local
+        )
 
-    merge_candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    merges = [[_token_bytes_to_string(left), _token_bytes_to_string(right)] for _, _, _, left, right in merge_candidates]
+    merge_candidates.sort(key=lambda item: (item.rank, item.left_rank, item.right_rank))
+    merges = [
+        [_token_bytes_to_string(candidate.left), _token_bytes_to_string(candidate.right)]
+        for candidate in merge_candidates
+    ]
     return vocab, merges
 
 
