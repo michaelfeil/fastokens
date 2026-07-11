@@ -7,8 +7,13 @@ pub mod post_processors;
 pub mod pre_tokenized;
 pub mod pre_tokenizers;
 
-use std::{fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
+use daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder};
 use rayon::prelude::*;
 use serde_json::Value;
 
@@ -336,6 +341,122 @@ impl Tokenizer {
             .collect()
     }
 
+    /// Encode a rendered prompt that contains structural token strings.
+    ///
+    /// Structural token strings are emitted as their token IDs when possible.
+    /// Non-structural text is encoded with `split_special_tokens=true`, after
+    /// restoring placeholders to their original text. This is intended for
+    /// chat-template output where template control tokens must remain
+    /// structural, but escaped user content that spells a control token must be
+    /// tokenized as ordinary text.
+    ///
+    /// `placeholder_map` is request-specific and maps placeholder text to the
+    /// original user text. `add_special_tokens` defaults to false in the Python
+    /// binding; callers replacing a rendered chat-template encode path should
+    /// keep it false unless they explicitly want post-processor tokens.
+    pub fn encode_with_structural_tokens(
+        &self,
+        input: &str,
+        structural_tokens: &StructuralTokenConfig,
+        placeholder_map: &HashMap<String, String>,
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>, Error> {
+        if structural_tokens.is_empty() {
+            return self.encode_with_options(input, add_special_tokens, false);
+        }
+
+        let mut ids = Vec::new();
+
+        if input.is_empty() {
+            return Ok(self.post_process(ids, add_special_tokens));
+        }
+
+        let placeholder_matcher = if placeholder_map.is_empty() {
+            None
+        } else {
+            let placeholder_tokens: Vec<String> = placeholder_map.keys().cloned().collect();
+            Some(PatternMatcher::new(
+                &placeholder_tokens,
+                "placeholder matcher",
+            )?)
+        };
+
+        for part in structural_tokens.structural_matcher.split(input) {
+            if part.is_match {
+                match self.token_to_id(part.text) {
+                    Some(id) => ids.push(id),
+                    None => ids.extend(self.encode_with_options(part.text, false, false)?),
+                }
+            } else {
+                self.encode_structural_text_part(
+                    part.text,
+                    placeholder_map,
+                    placeholder_matcher.as_ref(),
+                    &structural_tokens.non_special_added_tokens,
+                    &mut ids,
+                )?;
+            }
+        }
+
+        Ok(self.post_process(ids, add_special_tokens))
+    }
+
+    fn encode_structural_text_part(
+        &self,
+        text: &str,
+        placeholder_map: &HashMap<String, String>,
+        placeholder_matcher: Option<&PatternMatcher>,
+        non_special_added_tokens: &HashSet<String>,
+        ids: &mut Vec<u32>,
+    ) -> Result<(), Error> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let Some(placeholder_matcher) = placeholder_matcher else {
+            ids.extend(self.encode_with_options(text, false, true)?);
+            return Ok(());
+        };
+
+        for part in placeholder_matcher.split(text) {
+            if !part.is_match {
+                ids.extend(self.encode_with_options(part.text, false, true)?);
+                continue;
+            }
+
+            let Some(original) = placeholder_map.get(part.text) else {
+                ids.extend(self.encode_with_options(part.text, false, true)?);
+                continue;
+            };
+
+            if non_special_added_tokens.contains(original) {
+                self.encode_literal_structural_token(original, ids)?;
+            } else {
+                ids.extend(self.encode_with_options(original, false, true)?);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn encode_literal_structural_token(
+        &self,
+        token: &str,
+        ids: &mut Vec<u32>,
+    ) -> Result<(), Error> {
+        let Some(inner) = token.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+            ids.extend(self.encode_with_options(token, false, true)?);
+            return Ok(());
+        };
+
+        ids.extend(self.encode_with_options("<", false, true)?);
+        if !inner.is_empty() {
+            ids.extend(self.encode_with_options(inner, false, true)?);
+        }
+        ids.extend(self.encode_with_options(">", false, true)?);
+        Ok(())
+    }
+
     /// Replace the post-processor.  Called when transformers dynamically
     /// updates the post-processor (e.g. for `add_bos_token=True`).
     pub fn set_post_processor(&mut self, pp: Option<PostProcessor>) {
@@ -463,6 +584,14 @@ impl Tokenizer {
             None => vec![Segment::Text(input)],
         };
 
+        self.build_pre_tokenized_from_segments(input, segments)
+    }
+
+    fn build_pre_tokenized_from_segments<'a>(
+        &self,
+        input: &'a str,
+        segments: Vec<Segment<'a>>,
+    ) -> PreTokenizedString {
         // Fast path: if there's exactly one Text segment (no added token matches)
         // and normalization returns Cow::Borrowed, we just need a string copy.
         if segments.len() == 1
@@ -519,6 +648,114 @@ impl Tokenizer {
         }
 
         PreTokenizedString::new(buffer, splits)
+    }
+}
+
+/// Constant structural-token state for rendered-prompt encoding.
+///
+/// Build this once per tokenizer/chat-template setup. `structural_tokens`
+/// should include every token string that the rendered template may use as a
+/// structural boundary, including tag-like non-special added tokens such as
+/// `<tool>` in addition to tokens marked special by the tokenizer.
+pub struct StructuralTokenConfig {
+    structural_matcher: PatternMatcher,
+    non_special_added_tokens: HashSet<String>,
+}
+
+impl StructuralTokenConfig {
+    pub fn new(
+        structural_tokens: &[String],
+        non_special_added_tokens: &HashSet<String>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            structural_matcher: PatternMatcher::new(structural_tokens, "structural-token matcher")?,
+            non_special_added_tokens: non_special_added_tokens.clone(),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.structural_matcher.is_empty()
+    }
+}
+
+struct MatchedPart<'a> {
+    text: &'a str,
+    is_match: bool,
+}
+
+struct PatternMatcher {
+    matcher: Option<DoubleArrayAhoCorasick<usize>>,
+}
+
+impl PatternMatcher {
+    fn new(patterns: &[String], name: &str) -> Result<Self, Error> {
+        let mut unique_patterns: Vec<&str> = patterns
+            .iter()
+            .map(String::as_str)
+            .filter(|pattern| !pattern.is_empty())
+            .collect();
+        unique_patterns.sort_unstable();
+        unique_patterns.dedup();
+
+        if unique_patterns.is_empty() {
+            return Ok(Self { matcher: None });
+        }
+
+        let pattern_values: Vec<(&str, usize)> = unique_patterns
+            .iter()
+            .enumerate()
+            .map(|(idx, pattern)| (*pattern, idx))
+            .collect();
+        let matcher = DoubleArrayAhoCorasickBuilder::new()
+            .match_kind(daachorse::MatchKind::LeftmostLongest)
+            .build_with_values(pattern_values)
+            .map_err(|e| Error::Model(format!("error building {name}: {e}")))?;
+
+        Ok(Self {
+            matcher: Some(matcher),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.matcher.is_none()
+    }
+
+    fn split<'a>(&self, input: &'a str) -> Vec<MatchedPart<'a>> {
+        let Some(matcher) = &self.matcher else {
+            if input.is_empty() {
+                return Vec::new();
+            }
+            return vec![MatchedPart {
+                text: input,
+                is_match: false,
+            }];
+        };
+
+        let mut parts = Vec::new();
+        let mut prev_end = 0;
+
+        for m in matcher.leftmost_find_iter(input) {
+            if m.start() > prev_end {
+                parts.push(MatchedPart {
+                    text: &input[prev_end..m.start()],
+                    is_match: false,
+                });
+            }
+            parts.push(MatchedPart {
+                text: &input[m.start()..m.end()],
+                is_match: true,
+            });
+            prev_end = m.end();
+        }
+
+        if prev_end < input.len() {
+            parts.push(MatchedPart {
+                text: &input[prev_end..],
+                is_match: false,
+            });
+        }
+
+        parts
     }
 }
 
@@ -1204,6 +1441,174 @@ mod tests {
             our_split, hf_split,
             "split_special_tokens=true should match HF by tokenizing the whole \
              special span as text"
+        );
+    }
+
+    fn structural_test_tokenizer() -> Tokenizer {
+        let json = r#"{
+          "version": "1.0",
+          "added_tokens": [
+            {"id": 100, "content": "[BOS]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+            {"id": 101, "content": "<think>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+            {"id": 102, "content": "<tool>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+            {"id": 103, "content": "magic", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false}
+          ],
+          "normalizer": null,
+          "pre_tokenizer": null,
+          "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [
+              {"SpecialToken": {"id": "[BOS]", "type_id": 0}},
+              {"Sequence": {"id": "A", "type_id": 0}}
+            ],
+            "pair": [],
+            "special_tokens": {
+              "[BOS]": {"id": "[BOS]", "ids": [100], "tokens": ["[BOS]"]}
+            }
+          },
+          "decoder": null,
+          "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": "",
+            "end_of_word_suffix": "",
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {
+              " ": 0, "<": 1, ">": 2, "e": 3, "h": 4, "i": 5,
+              "k": 6, "l": 7, "n": 8, "o": 9, "t": 10,
+              "a": 11, "c": 12, "g": 13, "m": 14
+            },
+            "merges": []
+          }
+        }"#;
+        Tokenizer::from_json(serde_json::from_str(json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_mixes_template_ids_and_literal_placeholders() {
+        let tok = structural_test_tokenizer();
+        let structural_config = StructuralTokenConfig::new(
+            &["<think>".to_string(), "<tool>".to_string()],
+            &HashSet::from(["<tool>".to_string()]),
+        )
+        .unwrap();
+        let think_placeholder = "\u{e000}STRUCTTOK_0\u{e000}".to_string();
+        let tool_placeholder = "\u{e000}STRUCTTOK_1\u{e000}".to_string();
+        let placeholder_map = HashMap::from([
+            (think_placeholder.clone(), "<think>".to_string()),
+            (tool_placeholder.clone(), "<tool>".to_string()),
+        ]);
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                &format!("hello <think> {think_placeholder} <tool> {tool_placeholder}"),
+                &structural_config,
+                &placeholder_map,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                4, 3, 7, 7, 9, 0,   // "hello "
+                101, // structural "<think>"
+                0, 1, 10, 4, 5, 8, 6, 2, // literal " <think>"
+                0, 102, // structural " <tool>"
+                0, 1, 10, 9, 9, 7, 2, // literal " <tool>"
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_can_add_post_processor_tokens() {
+        let tok = structural_test_tokenizer();
+        let structural_config =
+            StructuralTokenConfig::new(&["<think>".to_string()], &HashSet::new()).unwrap();
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                "hello <think>",
+                &structural_config,
+                &HashMap::new(),
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(ids, vec![100, 4, 3, 7, 7, 9, 0, 101]);
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_empty_config_uses_normal_added_token_matching() {
+        let tok = structural_test_tokenizer();
+        let structural_config = StructuralTokenConfig::new(&[], &HashSet::new()).unwrap();
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                "<think> magic",
+                &structural_config,
+                &HashMap::new(),
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(ids, vec![101, 0, 103]);
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_keeps_bare_non_special_added_tokens() {
+        let tok = structural_test_tokenizer();
+        let structural_config =
+            StructuralTokenConfig::new(&["<think>".to_string()], &HashSet::new()).unwrap();
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                "hello magic <think>",
+                &structural_config,
+                &HashMap::new(),
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                4, 3, 7, 7, 9, 0,   // "hello "
+                103, // bare non-special added token "magic"
+                0, 101, // structural " <think>"
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_keeps_restored_bare_non_special_added_tokens() {
+        let tok = structural_test_tokenizer();
+        let structural_config = StructuralTokenConfig::new(
+            &["<think>".to_string()],
+            &HashSet::from(["magic".to_string()]),
+        )
+        .unwrap();
+        let placeholder = "\u{e000}STRUCTTOK_0\u{e000}".to_string();
+        let placeholder_map = HashMap::from([(placeholder.clone(), "magic".to_string())]);
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                &format!("hello {placeholder} <think>"),
+                &structural_config,
+                &placeholder_map,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                4, 3, 7, 7, 9, 0,   // "hello "
+                103, // restored bare non-special added token "magic"
+                0, 101, // structural " <think>"
+            ]
         );
     }
 

@@ -69,6 +69,20 @@ class Encoding:
     def merge(encodings: list["Encoding"], growing_offsets: bool = True) -> "Encoding": ...
 
 
+class StructuralTokenConfig:
+    """Constant structural-token state for rendered-prompt encoding.
+
+    Include every token string the rendered template may use as a structural
+    boundary, including tag-like non-special added tokens.
+    """
+
+    def __new__(
+        cls,
+        structural_tokens: list[str] | set[str] | tuple[str, ...],
+        non_special_added_tokens: Optional[set[str] | list[str] | tuple[str, ...]] = None,
+    ) -> "StructuralTokenConfig": ...
+
+
 class Tokenizer:
     """An LLM tokenizer backed by ``tokenizer.json``."""
 
@@ -136,6 +150,22 @@ class Tokenizer:
         add_special_tokens: bool = False,
         split_special_tokens: bool = False,
     ) -> list[Encoding]: ...
+
+    def encode_with_structural_tokens(
+        self,
+        input: str,
+        structural_config: StructuralTokenConfig,
+        placeholder_map: Optional[dict[str, str]] = None,
+        add_special_tokens: bool = False,
+    ) -> Encoding:
+        """Encode rendered template text with structural-token boundaries.
+
+        ``placeholder_map`` is per request and maps placeholder text to the
+        original user text. Keep ``add_special_tokens=False`` when replacing an
+        existing rendered chat-template encode path. Backend truncation and
+        padding settings are intentionally not applied.
+        """
+        ...
 
     async def async_encode_batch(
         self,

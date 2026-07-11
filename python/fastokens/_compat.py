@@ -274,6 +274,21 @@ class _TokenizerShim:
             split_special_tokens=split_special_tokens,
         )
 
+    def encode_with_structural_tokens(
+        self,
+        sequence: str,
+        structural_config,
+        placeholder_map: dict[str, str] | None = None,
+        add_special_tokens: bool = False,
+    ) -> Encoding:
+        """Encode rendered template text with structural-token boundaries."""
+        return self._fast.encode_with_structural_tokens(
+            sequence,
+            structural_config,
+            placeholder_map or {},
+            add_special_tokens=add_special_tokens,
+        )
+
     async def async_encode_batch(
         self,
         inputs: list[str],
