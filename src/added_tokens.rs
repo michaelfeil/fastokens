@@ -295,9 +295,10 @@ impl AddedTokens {
                     cursor += text.len();
                 }
                 Segment::Token(id) => {
-                    let Some(content) = self.id_to_content.get(&id) else {
-                        continue;
-                    };
+                    let content = self
+                        .id_to_content
+                        .get(&id)
+                        .expect("matcher id must exist in added-token content map");
                     let start = cursor;
                     let end = start + content.len();
 
