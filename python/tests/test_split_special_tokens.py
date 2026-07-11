@@ -3,7 +3,7 @@ import unittest
 from copy import deepcopy
 
 from fastokens._compat import _TokenizerShim
-from fastokens._native import Tokenizer
+from fastokens._native import StructuralTokenConfig, Tokenizer
 
 
 BOS_TOKEN = "[BOS]"
@@ -233,6 +233,94 @@ class SplitSpecialTokensTests(unittest.TestCase):
                     copied.encode(special_token, add_special_tokens=False).ids,
                     _char_ids(tokenizer_json, special_token),
                 )
+
+    def test_native_encode_with_structural_tokens(self) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = Tokenizer.from_json_str(tokenizer_json)
+        think_placeholder = "\ue000STRUCTTOK_0\ue000"
+        tool_placeholder = "\ue000STRUCTTOK_1\ue000"
+        structural_config = StructuralTokenConfig(
+            {"<think>", "<tool>"},
+            {"<tool>"},
+        )
+
+        ids = tokenizer.encode_with_structural_tokens(
+            f"hello <think> {think_placeholder} <tool> {tool_placeholder}",
+            structural_config,
+            {
+                think_placeholder: "<think>",
+                tool_placeholder: "<tool>",
+            },
+        ).ids
+
+        self.assertEqual(
+            ids,
+            [
+                *_char_ids(tokenizer_json, "hello "),
+                SPECIAL_ID,
+                *_char_ids(tokenizer_json, " "),
+                *_char_ids(tokenizer_json, "<think>"),
+                *_char_ids(tokenizer_json, " "),
+                NON_SPECIAL_ID,
+                *_char_ids(tokenizer_json, " "),
+                *_char_ids(tokenizer_json, "<tool>"),
+            ],
+        )
+
+    def test_native_encode_with_structural_tokens_can_add_special_tokens(self) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = Tokenizer.from_json_str(tokenizer_json)
+        structural_config = StructuralTokenConfig({"<think>"})
+
+        ids = tokenizer.encode_with_structural_tokens(
+            "hello <think>",
+            structural_config,
+            add_special_tokens=True,
+        ).ids
+
+        self.assertEqual(
+            ids,
+            [BOS_ID, *_char_ids(tokenizer_json, "hello "), SPECIAL_ID],
+        )
+
+    def test_native_encode_with_structural_tokens_keeps_bare_non_special_added_tokens(
+        self,
+    ) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "magic")
+        tokenizer = Tokenizer.from_json_str(tokenizer_json)
+        structural_config = StructuralTokenConfig({"<think>"})
+
+        ids = tokenizer.encode_with_structural_tokens(
+            "hello magic <think>",
+            structural_config,
+        ).ids
+
+        self.assertEqual(
+            ids,
+            [
+                *_char_ids(tokenizer_json, "hello "),
+                NON_SPECIAL_ID,
+                *_char_ids(tokenizer_json, " "),
+                SPECIAL_ID,
+            ],
+        )
+
+    def test_shim_forwards_encode_with_structural_tokens(self) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = _TokenizerShim.from_str(tokenizer_json)
+        think_placeholder = "\ue000STRUCTTOK_0\ue000"
+        structural_config = StructuralTokenConfig({"<think>"})
+
+        ids = tokenizer.encode_with_structural_tokens(
+            f"<think>{think_placeholder}",
+            structural_config,
+            {think_placeholder: "<think>"},
+        ).ids
+
+        self.assertEqual(
+            ids,
+            [SPECIAL_ID, *_char_ids(tokenizer_json, "<think>")],
+        )
 
     def test_shim_rejects_unknown_encode_kwargs(self) -> None:
         tokenizer = _TokenizerShim.from_str(_tokenizer_json("<think>", "<tool>"))
