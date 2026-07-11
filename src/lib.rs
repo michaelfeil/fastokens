@@ -634,6 +634,8 @@ pub fn decode_stream_step(
 mod tests {
     use crate::hf_hub_support::make_api;
 
+    use std::str::FromStr;
+
     use super::*;
 
     const HF_MODELS: &[&str] = &[
@@ -1124,6 +1126,85 @@ mod tests {
             .encode_with_options(input, false, false)
             .unwrap_or_else(|e| panic!("{model}: fastokens encode({input:?}): {e}"));
         assert_eq!(our_ids, hf_ids, "default special-token matching mismatch");
+    }
+
+    /// Verify that `split_special_tokens=true` matches HuggingFace
+    /// `tokenizers` when a non-special added token's content is contained
+    /// within a special added token's content.
+    ///
+    /// Config: special `<mask>` (id 6) + non-special `mask` (id 7), input
+    /// `<mask>`. HF runs the full leftmost-longest matcher, so `<mask>`
+    /// (special) wins over `mask` (non-special) and — with
+    /// `encode_special_tokens=true` — the matched span is tokenized as
+    /// ordinary text, yielding the char-level ids `[0,1,2,3,4,5]`. fastokens
+    /// should do the same rather than letting `mask` match inside the special
+    /// span as added-token id 7.
+    ///
+    /// The added-token ids are chosen as `vocab_size + index` (6, 7) because HF
+    /// `tokenizers` ignores the `id` field in `added_tokens` and assigns ids
+    /// sequentially from the model vocab size; fastokens respects the `id`
+    /// field, so the two only agree when the JSON ids match HF's assignment.
+    ///
+    /// The default-path baseline (`split_special_tokens=false`) confirms the
+    /// tokenizer JSON is valid for both backends.
+    #[test]
+    fn split_special_tokens_overlapping_non_special_matches_hf() {
+        let json = r#"{
+          "version": "1.0",
+          "added_tokens": [
+            {"id": 6, "content": "<mask>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+            {"id": 7, "content": "mask", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false}
+          ],
+          "normalizer": null,
+          "pre_tokenizer": null,
+          "post_processor": null,
+          "decoder": null,
+          "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": "",
+            "end_of_word_suffix": "",
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {"<": 0, "m": 1, "a": 2, "s": 3, "k": 4, ">": 5},
+            "merges": []
+          }
+        }"#;
+
+        let mut hf = tokenizers::Tokenizer::from_str(json).expect("HF load failed");
+        let ours = Tokenizer::from_json(serde_json::from_str(json).unwrap())
+            .expect("fastokens load failed");
+
+        // Baseline: default path (split=false) — both emit the special id.
+        hf.set_encode_special_tokens(false);
+        let hf_default: Vec<u32> = hf.encode("<mask>", false).unwrap().get_ids().to_vec();
+        let our_default = ours.encode_with_options("<mask>", false, false).unwrap();
+        assert_eq!(
+            our_default, hf_default,
+            "default path baseline: fastokens must match HF"
+        );
+        assert_eq!(
+            our_default,
+            vec![6],
+            "default path should emit the special id"
+        );
+
+        // Split path (split=true): HF tokenizes the whole <mask> as text.
+        hf.set_encode_special_tokens(true);
+        let hf_split: Vec<u32> = hf.encode("<mask>", false).unwrap().get_ids().to_vec();
+        let our_split = ours.encode_with_options("<mask>", false, true).unwrap();
+
+        assert_eq!(
+            hf_split,
+            vec![0, 1, 2, 3, 4, 5],
+            "HF should tokenize the special span as ordinary text"
+        );
+        assert_eq!(
+            our_split, hf_split,
+            "split_special_tokens=true should match HF by tokenizing the whole \
+             special span as text"
+        );
     }
 
     // ── Cache consistency ────────────────────────────────────────────

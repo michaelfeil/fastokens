@@ -13,7 +13,6 @@ use crate::json_structs::AddedTokenConfig;
 /// through normalization, pre-tokenization and the model as usual.
 pub struct AddedTokens {
     all: AddedTokenMatcher,
-    non_special: Option<AddedTokenMatcher>,
     has_special_tokens: bool,
     /// Mapping from token ID to token content string.
     id_to_content: HashMap<u32, String>,
@@ -205,25 +204,14 @@ impl AddedTokens {
             })
             .collect();
 
-        let non_special_patterns: Vec<(&str, u32)> = configs
-            .iter()
-            .filter(|c| !c.special)
-            .map(|c| (c.content.as_str(), c.id))
-            .collect();
         let Some(all) = AddedTokenMatcher::new(patterns)? else {
             debug_assert!(false, "non-empty configs should produce token patterns");
             return Ok(None);
         };
         let has_special_tokens = !special_ids.is_empty();
-        let non_special = if has_special_tokens {
-            AddedTokenMatcher::new(non_special_patterns)?
-        } else {
-            None
-        };
 
         Ok(Some(Self {
             all,
-            non_special,
             has_special_tokens,
             id_to_content,
             content_to_id,
@@ -294,10 +282,50 @@ impl AddedTokens {
             return self.all.split(input);
         }
 
-        match &self.non_special {
-            Some(non_special) => non_special.split(input),
-            None => vec![Segment::Text(input)],
+        let mut segments = Vec::new();
+        let mut cursor = 0;
+        let mut pending_text_start: Option<usize> = None;
+
+        for segment in self.all.split(input) {
+            match segment {
+                Segment::Text(text) => {
+                    if !text.is_empty() && pending_text_start.is_none() {
+                        pending_text_start = Some(cursor);
+                    }
+                    cursor += text.len();
+                }
+                Segment::Token(id) => {
+                    let Some(content) = self.id_to_content.get(&id) else {
+                        continue;
+                    };
+                    let start = cursor;
+                    let end = start + content.len();
+
+                    if self.special_ids.contains(&id) {
+                        if pending_text_start.is_none() {
+                            pending_text_start = Some(start);
+                        }
+                    } else {
+                        if let Some(text_start) = pending_text_start.take()
+                            && text_start < start
+                        {
+                            segments.push(Segment::Text(&input[text_start..start]));
+                        }
+                        segments.push(Segment::Token(id));
+                    }
+
+                    cursor = end;
+                }
+            }
         }
+
+        if let Some(text_start) = pending_text_start
+            && text_start < cursor
+        {
+            segments.push(Segment::Text(&input[text_start..cursor]));
+        }
+
+        segments
     }
 }
 
@@ -553,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn split_special_as_text_allows_non_special_match_inside_special_text() {
+    fn split_special_as_text_blocks_non_special_match_inside_special_text() {
         let mut special = make_config(1, "<mask>");
         special.special = true;
         let non_special = make_config(2, "ask>");
@@ -563,7 +591,7 @@ mod tests {
 
         assert_eq!(
             at.split_special_as_text("<mask>"),
-            vec![Segment::Text("<m"), Segment::Token(2)]
+            vec![Segment::Text("<mask>")]
         );
     }
 
