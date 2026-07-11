@@ -1029,6 +1029,50 @@ mod tests {
         assert!(f.is_empty(), "hoangquan456/Kimi-K2.5:\n{}", f.join("\n"));
     }
 
+    #[test]
+    fn split_special_tokens_kimi_k2_5_matches_hf_tokenizers() {
+        let model = "hoangquan456/Kimi-K2.5";
+        let mut hf = tokenizers::Tokenizer::from_pretrained(model, None)
+            .unwrap_or_else(|e| panic!("{model}: HF load failed: {e}"));
+        let ours =
+            Tokenizer::from_model(model).unwrap_or_else(|e| panic!("{model}: load failed: {e}"));
+
+        let inputs = &[
+            "<think>",
+            "hello <think> world",
+            "🤔<think>final answer",
+            "<|tool_calls_section_begin|>{\"name\":\"search\"}",
+        ];
+
+        hf.set_encode_special_tokens(true);
+        for input in inputs {
+            let hf_ids = hf
+                .encode(*input, false)
+                .unwrap_or_else(|e| panic!("{model}: HF encode({input:?}): {e}"))
+                .get_ids()
+                .to_vec();
+            let our_ids = ours
+                .encode_with_options(input, false, true)
+                .unwrap_or_else(|e| panic!("{model}: fastokens encode({input:?}): {e}"));
+            assert_eq!(
+                our_ids, hf_ids,
+                "split_special_tokens=true mismatch on {input:?}"
+            );
+        }
+
+        hf.set_encode_special_tokens(false);
+        let input = "<think>";
+        let hf_ids = hf
+            .encode(input, false)
+            .unwrap_or_else(|e| panic!("{model}: HF encode({input:?}): {e}"))
+            .get_ids()
+            .to_vec();
+        let our_ids = ours
+            .encode_with_options(input, false, false)
+            .unwrap_or_else(|e| panic!("{model}: fastokens encode({input:?}): {e}"));
+        assert_eq!(our_ids, hf_ids, "default special-token matching mismatch");
+    }
+
     // ── Cache consistency ────────────────────────────────────────────
 
     /// Verify that encoding the same input twice produces identical results,
