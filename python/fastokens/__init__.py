@@ -1,6 +1,11 @@
-from fastokens._native import Tokenizer
+from fastokens._native import StructuralTokenConfig, Tokenizer
 
-__all__ = ["Tokenizer", "patch_transformers", "unpatch_transformers"]
+__all__ = [
+    "StructuralTokenConfig",
+    "Tokenizer",
+    "patch_transformers",
+    "unpatch_transformers",
+]
 
 
 _patched = False

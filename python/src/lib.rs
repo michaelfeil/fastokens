@@ -1,8 +1,11 @@
-use std::sync::{Arc, LazyLock, RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, LazyLock, RwLock},
+};
 
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rayon::prelude::*;
 use serde_json::Value;
@@ -16,6 +19,18 @@ static TOKIO_RUNTIME: LazyLock<Arc<Runtime>> = LazyLock::new(|| {
             .expect("failed to create global Tokio runtime"),
     )
 });
+
+fn extract_string_vec(value: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<String>> {
+    if let Ok(values) = value.extract::<Vec<String>>() {
+        return Ok(values);
+    }
+    if let Ok(values) = value.extract::<HashSet<String>>() {
+        return Ok(values.into_iter().collect());
+    }
+    Err(PyTypeError::new_err(format!(
+        "{name} must be a sequence or set of strings"
+    )))
+}
 
 // ---------------------------------------------------------------------------
 // PyEncoding
@@ -455,6 +470,12 @@ impl TokenizerState {
             .collect())
     }
 
+    fn build_single_encoding(&self, mut ids: Vec<u32>) -> PyEncoding {
+        self.do_truncate(&mut ids);
+        let target = self.single_pad_target(ids.len());
+        build_encoding(ids, self.pad.as_ref(), target)
+    }
+
     /// Parse `json`, update the Rust post-processor in place, and cache the JSON.
     fn update_post_processor_json(&mut self, json: &str) -> PyResult<()> {
         use fastokens::json_structs::PostProcessorConfig;
@@ -469,6 +490,39 @@ impl TokenizerState {
         self.inner.set_post_processor(Some(pp));
         self.post_processor_json = Some(json.to_string());
         Ok(())
+    }
+}
+
+#[pyclass(name = "StructuralTokenConfig")]
+struct PyStructuralTokenConfig {
+    inner: Arc<fastokens::StructuralTokenConfig>,
+}
+
+#[pymethods]
+impl PyStructuralTokenConfig {
+    /// Build constant structural-token state for rendered-prompt encoding.
+    ///
+    /// Include every token string that the rendered template may use as a
+    /// structural boundary, including tag-like non-special added tokens.
+    #[new]
+    #[pyo3(signature = (structural_tokens, non_special_added_tokens = None))]
+    fn new(
+        structural_tokens: &Bound<'_, PyAny>,
+        non_special_added_tokens: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let structural_tokens = extract_string_vec(structural_tokens, "structural_tokens")?;
+        let non_special_added_tokens = match non_special_added_tokens {
+            Some(value) => extract_string_vec(value, "non_special_added_tokens")?
+                .into_iter()
+                .collect(),
+            None => HashSet::new(),
+        };
+        let inner =
+            fastokens::StructuralTokenConfig::new(&structural_tokens, &non_special_added_tokens)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 }
 
@@ -695,6 +749,47 @@ impl PyTokenizer {
                 state.do_truncate(&mut ids);
                 let target = state.single_pad_target(ids.len());
                 Ok::<PyEncoding, String>(build_encoding(ids, state.pad.as_ref(), target))
+            })
+            .map_err(PyValueError::new_err)?;
+
+        Py::new(py, encoding)
+    }
+
+    /// Encode a rendered prompt containing structural token strings.
+    ///
+    /// Structural tokens are emitted as token IDs. Text spans are encoded with
+    /// split-special-token behavior, after restoring placeholders to their
+    /// original user text. Keep `add_special_tokens=false` when replacing an
+    /// existing rendered chat-template encode path.
+    #[pyo3(signature = (
+        input,
+        structural_config,
+        placeholder_map = None,
+        add_special_tokens = false
+    ))]
+    fn encode_with_structural_tokens(
+        &self,
+        input: &str,
+        structural_config: PyRef<'_, PyStructuralTokenConfig>,
+        placeholder_map: Option<HashMap<String, String>>,
+        add_special_tokens: bool,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyEncoding>> {
+        let placeholder_map = placeholder_map.unwrap_or_default();
+        let structural_config = Arc::clone(&structural_config.inner);
+        let encoding = py
+            .allow_threads(|| {
+                let state = self.read();
+                let ids = state
+                    .inner
+                    .encode_with_structural_tokens(
+                        input,
+                        &structural_config,
+                        &placeholder_map,
+                        add_special_tokens,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok::<PyEncoding, String>(state.build_single_encoding(ids))
             })
             .map_err(PyValueError::new_err)?;
 
@@ -1004,6 +1099,7 @@ impl PyDecodeStream {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEncoding>()?;
     m.add_class::<PyPostProcessor>()?;
+    m.add_class::<PyStructuralTokenConfig>()?;
     m.add_class::<PyTokenizer>()?;
     m.add_class::<PyDecodeStream>()?;
     Ok(())
