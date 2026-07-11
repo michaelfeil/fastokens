@@ -1,9 +1,21 @@
-use std::sync::RwLock;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3_async_runtimes::tokio::future_into_py;
+use rayon::prelude::*;
 use serde_json::Value;
+use tokio::runtime::Runtime;
+
+static TOKIO_RUNTIME: LazyLock<Arc<Runtime>> = LazyLock::new(|| {
+    Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create global Tokio runtime"),
+    )
+});
 
 // ---------------------------------------------------------------------------
 // PyEncoding
@@ -315,6 +327,7 @@ impl PyEncoding {
 // TruncationParams / PaddingParams
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct TruncationParams {
     max_length: usize,
     stride: usize,
@@ -322,6 +335,7 @@ struct TruncationParams {
     direction: String,
 }
 
+#[derive(Clone)]
 struct PaddingParams {
     direction: String,
     pad_id: u32,
@@ -404,6 +418,42 @@ impl TokenizerState {
         }
     }
 
+    fn encode_batch_encodings(
+        &self,
+        inputs: &[String],
+        add_special_tokens: bool,
+    ) -> Result<Vec<PyEncoding>, String> {
+        let mut batch: Vec<Vec<u32>> = inputs
+            .par_iter()
+            .map(|s| {
+                self.inner
+                    .encode_with_special_tokens(s.as_str(), add_special_tokens)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for ids in &mut batch {
+            self.do_truncate(ids);
+        }
+
+        let pad_target: Option<usize> = self.pad.as_ref().map(|p| {
+            let max_len = batch.iter().map(|ids| ids.len()).max().unwrap_or(0);
+            let base = p.length.unwrap_or(max_len).max(max_len);
+            match p.pad_to_multiple_of {
+                Some(m) if m > 0 => (base + m - 1) / m * m,
+                _ => base,
+            }
+        });
+
+        Ok(batch
+            .into_iter()
+            .map(|ids| {
+                let target = pad_target.unwrap_or(ids.len());
+                build_encoding(ids, self.pad.as_ref(), target)
+            })
+            .collect())
+    }
+
     /// Parse `json`, update the Rust post-processor in place, and cache the JSON.
     fn update_post_processor_json(&mut self, json: &str) -> PyResult<()> {
         use fastokens::json_structs::PostProcessorConfig;
@@ -424,7 +474,7 @@ impl TokenizerState {
 /// An LLM tokenizer backed by `tokenizer.json`.
 #[pyclass(name = "Tokenizer")]
 struct PyTokenizer {
-    state: RwLock<TokenizerState>,
+    state: Arc<RwLock<TokenizerState>>,
 }
 
 impl PyTokenizer {
@@ -449,12 +499,12 @@ impl PyTokenizer {
             .allow_threads(|| fastokens::Tokenizer::from_json(value).map_err(|e| e.to_string()))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
-            state: RwLock::new(TokenizerState {
+            state: Arc::new(RwLock::new(TokenizerState {
                 inner,
                 trunc: None,
                 pad: None,
                 post_processor_json,
-            }),
+            })),
         })
     }
 }
@@ -655,39 +705,48 @@ impl PyTokenizer {
         add_special_tokens: bool,
         py: Python<'_>,
     ) -> PyResult<Vec<Py<PyEncoding>>> {
-        use rayon::prelude::*;
-
         let state = self.read();
-        let mut batch: Vec<Vec<u32>> = inputs
-            .par_iter()
-            .map(|s| {
-                state
-                    .inner
-                    .encode_with_special_tokens(s.as_str(), add_special_tokens)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-
-        for ids in &mut batch {
-            state.do_truncate(ids);
-        }
-
-        let pad_target: Option<usize> = state.pad.as_ref().map(|p| {
-            let max_len = batch.iter().map(|ids| ids.len()).max().unwrap_or(0);
-            let base = p.length.unwrap_or(max_len).max(max_len);
-            match p.pad_to_multiple_of {
-                Some(m) if m > 0 => (base + m - 1) / m * m,
-                _ => base,
-            }
-        });
-
-        batch
+        let encodings = state
+            .encode_batch_encodings(&inputs, add_special_tokens)
+            .map_err(PyValueError::new_err)?;
+        encodings
             .into_iter()
-            .map(|ids| {
-                let target = pad_target.unwrap_or(ids.len());
-                Py::new(py, build_encoding(ids, state.pad.as_ref(), target))
-            })
+            .map(|encoding| Py::new(py, encoding))
             .collect()
+    }
+
+    /// Encode a batch of inputs in parallel and return a Python awaitable.
+    ///
+    /// Truncation is applied per-sequence; padding (if enabled) pads the
+    /// batch to a uniform length.
+    #[pyo3(signature = (inputs, add_special_tokens = false))]
+    fn async_encode_batch<'py>(
+        &self,
+        py: Python<'py>,
+        inputs: Vec<String>,
+        add_special_tokens: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let state = Arc::clone(&self.state);
+        let rt = Arc::clone(&TOKIO_RUNTIME);
+
+        future_into_py(py, async move {
+            let encodings = rt
+                .spawn_blocking(move || {
+                    let state = state.read().expect("PyTokenizer state lock poisoned");
+                    state.encode_batch_encodings(&inputs, add_special_tokens)
+                })
+                .await
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .map_err(PyValueError::new_err)?;
+
+            Python::with_gil(|py| {
+                let encodings: PyResult<Vec<Py<PyEncoding>>> = encodings
+                    .into_iter()
+                    .map(|encoding| Py::new(py, encoding))
+                    .collect();
+                Ok(encodings?.into_pyobject(py)?.unbind().into_any())
+            })
+        })
     }
 
     // ── Post-processing ───────────────────────────────────────────────
@@ -764,6 +823,35 @@ impl PyTokenizer {
             .inner
             .decode_batch(&refs, skip_special_tokens)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Decode a batch of token ID sequences and return a Python awaitable.
+    #[pyo3(signature = (sentences, skip_special_tokens = false))]
+    fn async_decode_batch<'py>(
+        &self,
+        py: Python<'py>,
+        sentences: Vec<Vec<u32>>,
+        skip_special_tokens: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let state = Arc::clone(&self.state);
+        let rt = Arc::clone(&TOKIO_RUNTIME);
+
+        future_into_py(py, async move {
+            let decoded = rt
+                .spawn_blocking(move || {
+                    let state = state.read().expect("PyTokenizer state lock poisoned");
+                    let refs: Vec<&[u32]> = sentences.iter().map(Vec::as_slice).collect();
+                    state
+                        .inner
+                        .decode_batch(&refs, skip_special_tokens)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .map_err(PyValueError::new_err)?;
+
+            Python::with_gil(|py| Ok(decoded.into_pyobject(py)?.unbind().into_any()))
+        })
     }
 
     // ── Vocabulary ────────────────────────────────────────────────────
