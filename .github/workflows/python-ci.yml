@@ -10,6 +10,9 @@ env:
   CARGO_TERM_COLOR: always
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -35,8 +38,10 @@ jobs:
         with:
           path: |
             ~/.cache/huggingface/hub
+            ~/.cache/huggingface/xet
             ~/.cache/tokenizers
-          key: ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-${{ hashFiles('python/tests/**/*.py') }}
+            !~/.cache/huggingface/token
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-qwen3-0.6b-transformers-4.57.1
           restore-keys: |
             ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-
             ${{ runner.os }}-hf-tokenizers-
