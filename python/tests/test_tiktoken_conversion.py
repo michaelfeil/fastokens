@@ -40,11 +40,19 @@ def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
         assert tokenizer.encode(text, add_special_tokens=False).ids == encoding.encode(text)
 
 
-def test_tiktoken_to_tokenizer_json_accepts_encoding_name_and_special_tokens(monkeypatch) -> None:
+def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch) -> None:
     encoding = _encoding()
     monkeypatch.setattr(tiktoken, "get_encoding", lambda name: encoding)
 
     tokenizer_json = tiktoken_to_tokenizer_json("fastokens-test")
+    tokenizer = Tokenizer.from_json_str(tokenizer_json)
+
+    assert tokenizer.encode("abcd", add_special_tokens=False).ids == [6]
+
+
+def test_tiktoken_to_tokenizer_json_preserves_special_tokens() -> None:
+    encoding = _encoding()
+    tokenizer_json = tiktoken_to_tokenizer_json(encoding)
     config = json.loads(tokenizer_json)
     special_token = "<|end|>"
     special_id = encoding._special_tokens[special_token]

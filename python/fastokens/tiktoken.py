@@ -8,8 +8,8 @@ def _byte_to_unicode() -> dict[int, str]:
     table: dict[int, str] = {}
     next_codepoint = 256
     for byte in range(256):
-        nice = 33 <= byte <= 126 or 0xA1 <= byte <= 0xAC or byte >= 0xAE
-        if nice:
+        should_use_direct_mapping = 33 <= byte <= 126 or 0xA1 <= byte <= 0xAC or byte >= 0xAE
+        if should_use_direct_mapping:
             table[byte] = chr(byte)
         else:
             table[byte] = chr(next_codepoint)
