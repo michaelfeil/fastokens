@@ -277,14 +277,24 @@ impl AddedTokens {
     /// special-token strings are tokenized through the normal model pipeline,
     /// while non-special added tokens can still match as added tokens.
     pub fn split_special_as_text<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
+        self.split_special_and_ignored_as_text(input, &HashSet::new())
+    }
+
+    /// Split `input` into segments while leaving special added tokens and any
+    /// caller-provided added-token contents as text.
+    pub fn split_special_and_ignored_as_text<'a>(
+        &self,
+        input: &'a str,
+        ignored_contents: &HashSet<String>,
+    ) -> Vec<Segment<'a>> {
         if input.is_empty() {
             return Vec::new();
         }
 
-        if !self.has_special_tokens {
+        if !self.has_special_tokens && ignored_contents.is_empty() {
             return self.all.split(input);
         }
-        if !self.has_non_special_tokens {
+        if !self.has_non_special_tokens && ignored_contents.is_empty() {
             return vec![Segment::Text(input)];
         }
 
@@ -308,7 +318,7 @@ impl AddedTokens {
                     let start = cursor;
                     let end = start + content.len();
 
-                    if self.special_ids.contains(&id) {
+                    if self.special_ids.contains(&id) || ignored_contents.contains(content) {
                         if pending_text_start.is_none() {
                             pending_text_start = Some(start);
                         }

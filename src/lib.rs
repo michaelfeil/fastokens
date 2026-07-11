@@ -389,7 +389,7 @@ impl Tokenizer {
                     part.text,
                     placeholder_map,
                     placeholder_matcher.as_ref(),
-                    &structural_tokens.non_special_added_tokens,
+                    &structural_tokens.tag_like_non_special_added_tokens,
                     &mut ids,
                 )?;
             }
@@ -403,7 +403,7 @@ impl Tokenizer {
         text: &str,
         placeholder_map: &HashMap<String, String>,
         placeholder_matcher: Option<&PatternMatcher>,
-        non_special_added_tokens: &HashSet<String>,
+        ignored_added_tokens: &HashSet<String>,
         ids: &mut Vec<u32>,
     ) -> Result<(), Error> {
         if text.is_empty() {
@@ -428,46 +428,62 @@ impl Tokenizer {
                 continue;
             };
 
-            if non_special_added_tokens.contains(original) && is_tag_like_token(original) {
-                self.flush_structural_text_buffer(&mut text_buffer, ids)?;
-                self.encode_literal_structural_token(original, ids)?;
-            } else {
-                text_buffer.push_str(original);
-            }
+            text_buffer.push_str(original);
         }
 
-        self.flush_structural_text_buffer(&mut text_buffer, ids)?;
+        self.flush_structural_text_buffer(&mut text_buffer, ignored_added_tokens, ids)?;
         Ok(())
     }
 
     fn flush_structural_text_buffer(
         &self,
         buffer: &mut String,
+        ignored_added_tokens: &HashSet<String>,
         ids: &mut Vec<u32>,
     ) -> Result<(), Error> {
         if !buffer.is_empty() {
-            ids.extend(self.encode_with_options(buffer, false, true)?);
+            ids.extend(self.encode_structural_text_buffer(buffer, ignored_added_tokens)?);
             buffer.clear();
         }
         Ok(())
     }
 
-    fn encode_literal_structural_token(
+    fn encode_structural_text_buffer(
         &self,
-        token: &str,
-        ids: &mut Vec<u32>,
-    ) -> Result<(), Error> {
-        let Some(inner) = token.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
-            ids.extend(self.encode_with_options(token, false, true)?);
-            return Ok(());
-        };
-
-        ids.extend(self.encode_with_options("<", false, true)?);
-        if !inner.is_empty() {
-            ids.extend(self.encode_with_options(inner, false, true)?);
+        text: &str,
+        ignored_added_tokens: &HashSet<String>,
+    ) -> Result<Vec<u32>, Error> {
+        if ignored_added_tokens.is_empty() {
+            return self.encode_with_options(text, false, true);
         }
-        ids.extend(self.encode_with_options(">", false, true)?);
-        Ok(())
+
+        self.encode_with_ignored_added_tokens(text, ignored_added_tokens)
+    }
+
+    fn encode_with_ignored_added_tokens(
+        &self,
+        input: &str,
+        ignored_added_tokens: &HashSet<String>,
+    ) -> Result<Vec<u32>, Error> {
+        let mut pts =
+            self.build_pre_tokenized_with_ignored_added_tokens(input, ignored_added_tokens);
+
+        if let Some(ref split) = self.split_only {
+            split.pre_tokenize(&mut pts)?;
+            let ids = pts
+                .tokenize_batched(|buf, splits, out| {
+                    self.model.tokenize_batch_fused(buf, splits, out)
+                })
+                .map_err(Error::Model)?;
+            return Ok(ids);
+        }
+
+        if let Some(ref pt) = self.pre_tokenizer {
+            pt.pre_tokenize(&mut pts)?;
+        }
+
+        pts.tokenize(|text, out| self.model.tokenize_into(text, out))
+            .map_err(Error::Model)
     }
 
     /// Replace the post-processor.  Called when transformers dynamically
@@ -597,6 +613,27 @@ impl Tokenizer {
             None => vec![Segment::Text(input)],
         };
 
+        self.build_pre_tokenized_from_segments(input, segments)
+    }
+
+    fn build_pre_tokenized_with_ignored_added_tokens(
+        &self,
+        input: &str,
+        ignored_added_tokens: &HashSet<String>,
+    ) -> PreTokenizedString {
+        let segments = match &self.added_tokens {
+            Some(at) => at.split_special_and_ignored_as_text(input, ignored_added_tokens),
+            None => vec![Segment::Text(input)],
+        };
+
+        self.build_pre_tokenized_from_segments(input, segments)
+    }
+
+    fn build_pre_tokenized_from_segments<'a>(
+        &self,
+        input: &'a str,
+        segments: Vec<Segment<'a>>,
+    ) -> PreTokenizedString {
         // Fast path: if there's exactly one Text segment (no added token matches)
         // and normalization returns Cow::Borrowed, we just need a string copy.
         if segments.len() == 1
@@ -664,7 +701,7 @@ impl Tokenizer {
 /// `<tool>` in addition to tokens marked special by the tokenizer.
 pub struct StructuralTokenConfig {
     structural_matcher: PatternMatcher,
-    non_special_added_tokens: HashSet<String>,
+    tag_like_non_special_added_tokens: HashSet<String>,
 }
 
 impl StructuralTokenConfig {
@@ -674,7 +711,11 @@ impl StructuralTokenConfig {
     ) -> Result<Self, Error> {
         Ok(Self {
             structural_matcher: PatternMatcher::new(structural_tokens)?,
-            non_special_added_tokens: non_special_added_tokens.clone(),
+            tag_like_non_special_added_tokens: non_special_added_tokens
+                .iter()
+                .filter(|token| is_tag_like_token(token))
+                .cloned()
+                .collect(),
         })
     }
 
@@ -1487,9 +1528,10 @@ mod tests {
             "vocab": {
               " ": 0, "<": 1, ">": 2, "e": 3, "h": 4, "i": 5,
               "k": 6, "l": 7, "n": 8, "o": 9, "t": 10,
-              "a": 11, "c": 12, "g": 13, "m": 14, "b": 15, "ab": 16
+              "a": 11, "c": 12, "g": 13, "m": 14, "b": 15, "ab": 16,
+              "a<": 17
             },
-            "merges": ["a b"]
+            "merges": ["a b", "a <"]
           }
         }"#;
         Tokenizer::from_json(serde_json::from_str(json).unwrap()).unwrap()
@@ -1642,6 +1684,36 @@ mod tests {
             ids,
             vec![
                 16, // merged "ab"
+                0, 101, // structural " <think>"
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_preserves_merges_across_restored_tag_literals() {
+        let tok = structural_test_tokenizer();
+        let structural_config = StructuralTokenConfig::new(
+            &["<think>".to_string(), "<tool>".to_string()],
+            &HashSet::from(["<tool>".to_string()]),
+        )
+        .unwrap();
+        let placeholder = "\u{e000}STRUCTTOK_0\u{e000}".to_string();
+        let placeholder_map = HashMap::from([(placeholder.clone(), "<tool>".to_string())]);
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                &format!("a{placeholder} <think>"),
+                &structural_config,
+                &placeholder_map,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                17, // merged "a<"
+                10, 9, 9, 7, 2, // "tool>"
                 0, 101, // structural " <think>"
             ]
         );
