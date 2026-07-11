@@ -19,7 +19,7 @@ def hide_tiktoken(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
 
 
-def _encoding():
+def _create_test_encoding():
     tiktoken = pytest.importorskip("tiktoken")
     return tiktoken.Encoding(
         name="fastokens-test",
@@ -41,7 +41,7 @@ def _encoding():
 
 
 def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
-    encoding = _encoding()
+    encoding = _create_test_encoding()
     tokenizer = Tokenizer.from_json_str(tiktoken_to_tokenizer_json(encoding))
 
     texts = [
@@ -55,7 +55,7 @@ def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
 
 def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch: pytest.MonkeyPatch) -> None:
     tiktoken = pytest.importorskip("tiktoken")
-    encoding = _encoding()
+    encoding = _create_test_encoding()
     monkeypatch.setattr(tiktoken, "get_encoding", lambda name: encoding)
 
     tokenizer_json = tiktoken_to_tokenizer_json("fastokens-test")
@@ -65,7 +65,7 @@ def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch: pytest.Monke
 
 
 def test_tiktoken_to_tokenizer_json_preserves_special_tokens() -> None:
-    encoding = _encoding()
+    encoding = _create_test_encoding()
     tokenizer_json = tiktoken_to_tokenizer_json(encoding)
     config = json.loads(tokenizer_json)
     special_token = "<|end|>"
@@ -93,7 +93,7 @@ def test_tiktoken_to_tokenizer_json_returns_none_without_optional_tiktoken(
 
 def test_tiktoken_model_to_tokenizer_json_matches_model_file(tmp_path) -> None:
     tiktoken = pytest.importorskip("tiktoken")
-    encoding = _encoding()
+    encoding = _create_test_encoding()
     model_path = tmp_path / "tiktoken.model"
     model_path.write_text(
         "\n".join(
@@ -116,7 +116,7 @@ def test_tiktoken_model_to_tokenizer_json_matches_model_file(tmp_path) -> None:
 
 def test_tiktoken_model_to_tokenizer_json_reads_model_directory(tmp_path) -> None:
     tiktoken = pytest.importorskip("tiktoken")
-    encoding = _encoding()
+    encoding = _create_test_encoding()
     (tmp_path / "tiktoken.model").write_text(
         "\n".join(
             f"{base64.b64encode(token).decode()} {rank}"

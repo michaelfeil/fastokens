@@ -60,6 +60,10 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     }
 
     merge_candidates: list[_MergeCandidate] = []
+    def split_rank_pair(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
+        left_rank, right_rank, _, _ = split
+        return left_rank, right_rank
+
     for token, rank in mergeable_ranks.items():
         if len(token) == 1:
             continue
@@ -69,7 +73,7 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
             right = token[index:]
             if left in mergeable_ranks and right in mergeable_ranks:
                 local.append((mergeable_ranks[left], mergeable_ranks[right], left, right))
-        local.sort(key=lambda item: (item[0], item[1]))
+        local.sort(key=split_rank_pair)
         merge_candidates.extend(
             _MergeCandidate(
                 rank=rank,
@@ -216,7 +220,11 @@ def tiktoken_model_to_tokenizer_json(
         return None
 
     model_path, config = _load_model_config(model)
-    pattern = pattern or config.get("pat_str") or config.get("pattern") or DEFAULT_TIKTOKEN_PATTERN
+    if pattern is None:
+        config_pattern = config.get("pat_str")
+        if not isinstance(config_pattern, str):
+            config_pattern = config.get("pattern")
+        pattern = config_pattern if isinstance(config_pattern, str) else DEFAULT_TIKTOKEN_PATTERN
     special_tokens = _config_special_tokens(config) if special_tokens is None else special_tokens
     try:
         mergeable_ranks = load_tiktoken_bpe(model_path)
