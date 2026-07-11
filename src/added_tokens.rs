@@ -14,6 +14,7 @@ use crate::json_structs::AddedTokenConfig;
 pub struct AddedTokens {
     all: AddedTokenMatcher,
     has_special_tokens: bool,
+    has_non_special_tokens: bool,
     /// Mapping from token ID to token content string.
     id_to_content: HashMap<u32, String>,
     /// Reverse mapping: token content string → token ID.
@@ -209,10 +210,12 @@ impl AddedTokens {
             return Ok(None);
         };
         let has_special_tokens = !special_ids.is_empty();
+        let has_non_special_tokens = special_ids.len() != configs.len();
 
         Ok(Some(Self {
             all,
             has_special_tokens,
+            has_non_special_tokens,
             id_to_content,
             content_to_id,
             special_ids,
@@ -280,6 +283,9 @@ impl AddedTokens {
 
         if !self.has_special_tokens {
             return self.all.split(input);
+        }
+        if !self.has_non_special_tokens {
+            return vec![Segment::Text(input)];
         }
 
         let mut segments = Vec::new();
@@ -561,11 +567,15 @@ mod tests {
     fn split_special_as_text_without_non_special_tokens_returns_text() {
         let mut special = make_config(1, "<think>");
         special.special = true;
-        let at = AddedTokens::from_configs(&[special]).unwrap().unwrap();
+        let mut end_special = make_config(2, "</think>");
+        end_special.special = true;
+        let at = AddedTokens::from_configs(&[special, end_special])
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
-            at.split_special_as_text("a<think>b"),
-            vec![Segment::Text("a<think>b")]
+            at.split_special_as_text("a<think>b</think>c"),
+            vec![Segment::Text("a<think>b</think>c")]
         );
         assert!(at.split_special_as_text("").is_empty());
     }
