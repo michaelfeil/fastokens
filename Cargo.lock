@@ -471,7 +471,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastokens"
+name = "fastokens-python"
+version = "0.2.0"
+dependencies = [
+ "fasttokens-b10",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "rayon",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fasttokens-b10"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -490,18 +502,6 @@ dependencies = [
  "strum",
  "thiserror",
  "tokenizers",
-]
-
-[[package]]
-name = "fastokens-python"
-version = "0.2.0"
-dependencies = [
- "fastokens",
- "pyo3",
- "pyo3-async-runtimes",
- "rayon",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
