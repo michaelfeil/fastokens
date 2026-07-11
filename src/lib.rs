@@ -371,8 +371,12 @@ impl Tokenizer {
             return Ok(self.post_process(ids, add_special_tokens));
         }
 
-        let placeholder_tokens: Vec<String> = placeholder_map.keys().cloned().collect();
-        let placeholder_matcher = PatternMatcher::new(&placeholder_tokens)?;
+        let placeholder_matcher = if placeholder_map.is_empty() {
+            None
+        } else {
+            let placeholder_tokens: Vec<String> = placeholder_map.keys().cloned().collect();
+            Some(PatternMatcher::new(&placeholder_tokens)?)
+        };
 
         for part in structural_tokens.structural_matcher.split(input) {
             if part.is_match {
@@ -384,7 +388,7 @@ impl Tokenizer {
                 self.encode_structural_text_part(
                     part.text,
                     placeholder_map,
-                    &placeholder_matcher,
+                    placeholder_matcher.as_ref(),
                     &structural_tokens.non_special_added_tokens,
                     &mut ids,
                 )?;
@@ -398,17 +402,18 @@ impl Tokenizer {
         &self,
         text: &str,
         placeholder_map: &HashMap<String, String>,
-        placeholder_matcher: &PatternMatcher,
+        placeholder_matcher: Option<&PatternMatcher>,
         non_special_added_tokens: &HashSet<String>,
         ids: &mut Vec<u32>,
     ) -> Result<(), Error> {
         if text.is_empty() {
             return Ok(());
         }
-        if placeholder_map.is_empty() {
+
+        let Some(placeholder_matcher) = placeholder_matcher else {
             ids.extend(self.encode_with_options(text, false, true)?);
             return Ok(());
-        }
+        };
 
         for part in placeholder_matcher.split(text) {
             if !part.is_match {
@@ -422,7 +427,7 @@ impl Tokenizer {
             };
 
             if non_special_added_tokens.contains(original) {
-                self.encode_literal_tag_like_token(original, ids)?;
+                self.encode_literal_structural_token(original, ids)?;
             } else {
                 ids.extend(self.encode_with_options(original, false, true)?);
             }
@@ -431,7 +436,11 @@ impl Tokenizer {
         Ok(())
     }
 
-    fn encode_literal_tag_like_token(&self, token: &str, ids: &mut Vec<u32>) -> Result<(), Error> {
+    fn encode_literal_structural_token(
+        &self,
+        token: &str,
+        ids: &mut Vec<u32>,
+    ) -> Result<(), Error> {
         let Some(inner) = token.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
             ids.extend(self.encode_with_options(token, false, true)?);
             return Ok(());

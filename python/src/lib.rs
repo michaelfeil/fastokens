@@ -5,7 +5,7 @@ use std::{
 
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList, PyString};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rayon::prelude::*;
 use serde_json::Value;
@@ -21,6 +21,11 @@ static TOKIO_RUNTIME: LazyLock<Arc<Runtime>> = LazyLock::new(|| {
 });
 
 fn extract_string_vec(value: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<String>> {
+    if value.downcast::<PyString>().is_ok() {
+        return Err(PyTypeError::new_err(format!(
+            "{name} must be a sequence or set of strings, not a single string"
+        )));
+    }
     if let Ok(values) = value.extract::<Vec<String>>() {
         return Ok(values);
     }

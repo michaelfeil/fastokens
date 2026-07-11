@@ -283,6 +283,13 @@ class SplitSpecialTokensTests(unittest.TestCase):
             [BOS_ID, *_char_ids(tokenizer_json, "hello "), SPECIAL_ID],
         )
 
+    def test_structural_token_config_rejects_single_string(self) -> None:
+        with self.assertRaisesRegex(TypeError, "not a single string"):
+            StructuralTokenConfig("<think>")
+
+        with self.assertRaisesRegex(TypeError, "not a single string"):
+            StructuralTokenConfig({"<think>"}, "<tool>")
+
     def test_native_encode_with_structural_tokens_keeps_bare_non_special_added_tokens(
         self,
     ) -> None:
