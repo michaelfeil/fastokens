@@ -40,7 +40,7 @@ jobs:
             ~/.cache/huggingface/hub
             ~/.cache/huggingface/xet
             ~/.cache/tokenizers
-          key: ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-qwen3-0.6b-transformers-4.57.1
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-${{ hashFiles('pyproject.toml', 'python/Cargo.toml', 'Cargo.lock', '.github/workflows/python-ci.yml') }}
           restore-keys: |
             ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-
             ${{ runner.os }}-hf-tokenizers-
