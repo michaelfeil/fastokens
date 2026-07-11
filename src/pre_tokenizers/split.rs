@@ -934,6 +934,9 @@ fn find_matches_pcre2(
 }
 
 fn find_matches_qwen3(input: &str, base: usize) -> Vec<(usize, usize)> {
+    // Qwen's pattern usually emits short pieces (words, single digits,
+    // punctuation runs), so one match per ~3 input bytes is a practical initial
+    // capacity without over-allocating heavily for long prompts.
     let mut matches = Vec::with_capacity(input.len() / 3);
     let mut pos = 0;
     while pos < input.len() {
@@ -986,6 +989,9 @@ fn qwen3_match_end(input: &str, pos: usize) -> Option<usize> {
             return Some(end);
         }
         let end = consume_while(input, pos, char::is_whitespace);
+        // Emulate `\s+(?!\S)`: for a multi-space run before a visible
+        // character, the regex backs off and leaves the final whitespace byte
+        // for the following optional-prefix branch.
         if end < input.len() && end - pos > 1 {
             return Some(end - 1);
         }

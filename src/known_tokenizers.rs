@@ -53,6 +53,8 @@ pub(crate) fn fingerprint(json: &TokenizerJson) -> Option<KnownTokenizer> {
 #[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) fn vendored_tokenizer_json(model: &str) -> Option<&'static str> {
     from_model_id(model)?;
+    // Placeholder for tokenizer JSON blobs once redistribution/license checks
+    // have been completed for each known tokenizer family.
     None
 }
 
