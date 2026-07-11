@@ -415,24 +415,40 @@ impl Tokenizer {
             return Ok(());
         };
 
+        let mut text_buffer = String::with_capacity(text.len());
+
         for part in placeholder_matcher.split(text) {
             if !part.is_match {
-                ids.extend(self.encode_with_options(part.text, false, true)?);
+                text_buffer.push_str(part.text);
                 continue;
             }
 
             let Some(original) = placeholder_map.get(part.text) else {
-                ids.extend(self.encode_with_options(part.text, false, true)?);
+                text_buffer.push_str(part.text);
                 continue;
             };
 
-            if non_special_added_tokens.contains(original) {
+            if non_special_added_tokens.contains(original) && is_tag_like_token(original) {
+                self.flush_structural_text_buffer(&mut text_buffer, ids)?;
                 self.encode_literal_structural_token(original, ids)?;
             } else {
-                ids.extend(self.encode_with_options(original, false, true)?);
+                text_buffer.push_str(original);
             }
         }
 
+        self.flush_structural_text_buffer(&mut text_buffer, ids)?;
+        Ok(())
+    }
+
+    fn flush_structural_text_buffer(
+        &self,
+        buffer: &mut String,
+        ids: &mut Vec<u32>,
+    ) -> Result<(), Error> {
+        if !buffer.is_empty() {
+            ids.extend(self.encode_with_options(buffer, false, true)?);
+            buffer.clear();
+        }
         Ok(())
     }
 
@@ -665,6 +681,10 @@ impl StructuralTokenConfig {
     fn is_empty(&self) -> bool {
         self.structural_matcher.is_empty()
     }
+}
+
+fn is_tag_like_token(token: &str) -> bool {
+    token.starts_with('<') && token.ends_with('>')
 }
 
 struct MatchedPart<'a> {
@@ -1467,9 +1487,9 @@ mod tests {
             "vocab": {
               " ": 0, "<": 1, ">": 2, "e": 3, "h": 4, "i": 5,
               "k": 6, "l": 7, "n": 8, "o": 9, "t": 10,
-              "a": 11, "c": 12, "g": 13, "m": 14
+              "a": 11, "c": 12, "g": 13, "m": 14, "b": 15, "ab": 16
             },
-            "merges": []
+            "merges": ["a b"]
           }
         }"#;
         Tokenizer::from_json(serde_json::from_str(json).unwrap()).unwrap()
@@ -1566,6 +1586,32 @@ mod tests {
             vec![
                 4, 3, 7, 7, 9, 0,   // "hello "
                 103, // bare non-special added token "magic"
+                0, 101, // structural " <think>"
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_with_structural_tokens_preserves_merges_across_placeholders() {
+        let tok = structural_test_tokenizer();
+        let structural_config =
+            StructuralTokenConfig::new(&["<think>".to_string()], &HashSet::new()).unwrap();
+        let placeholder = "\u{e000}STRUCTTOK_0\u{e000}".to_string();
+        let placeholder_map = HashMap::from([(placeholder.clone(), "b".to_string())]);
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                &format!("a{placeholder} <think>"),
+                &structural_config,
+                &placeholder_map,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                16, // merged "ab"
                 0, 101, // structural " <think>"
             ]
         );
