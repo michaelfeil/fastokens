@@ -2,8 +2,10 @@ import json
 import unittest
 from copy import deepcopy
 
+import numpy as np
+
 from fastokens._compat import _TokenizerShim
-from fastokens._native import StructuralTokenConfig, Tokenizer
+from fastokens._native import Encoding, StructuralTokenConfig, Tokenizer
 
 
 BOS_TOKEN = "[BOS]"
@@ -267,6 +269,40 @@ class SplitSpecialTokensTests(unittest.TestCase):
             ],
         )
 
+    def test_encoding_to_numpy_moves_ids(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        ids = encoding.to_numpy()
+
+        self.assertEqual(ids.dtype, np.dtype("uint32"))
+        np.testing.assert_array_equal(ids, np.array([1, 2, 3], dtype=np.uint32))
+        self.assertEqual(encoding.ids, [])
+
+    def test_native_encode_with_structural_tokens_to_numpy(self) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = Tokenizer.from_json_str(tokenizer_json)
+        think_placeholder = "\ue000STRUCTTOK_0\ue000"
+        structural_config = StructuralTokenConfig({"<think>"})
+        placeholder_map = {think_placeholder: "<think>"}
+        prompt = f"<think>{think_placeholder}"
+
+        encoding = tokenizer.encode_with_structural_tokens(
+            prompt,
+            structural_config,
+            placeholder_map,
+        )
+        ids = tokenizer.encode_with_structural_tokens_to_numpy(
+            prompt,
+            structural_config,
+            placeholder_map,
+        )
+
+        self.assertEqual(ids.dtype, np.dtype("uint32"))
+        np.testing.assert_array_equal(
+            ids,
+            np.array(encoding.ids, dtype=np.uint32),
+        )
+
     def test_native_encode_with_structural_tokens_can_add_special_tokens(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
         tokenizer = Tokenizer.from_json_str(tokenizer_json)
@@ -348,6 +384,19 @@ class SplitSpecialTokensTests(unittest.TestCase):
             ids,
             [SPECIAL_ID, *_char_ids(tokenizer_json, "<think>")],
         )
+
+    def test_shim_forwards_encode_with_structural_tokens_to_numpy(self) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = _TokenizerShim.from_str(tokenizer_json)
+        structural_config = StructuralTokenConfig({"<think>"})
+
+        ids = tokenizer.encode_with_structural_tokens_to_numpy(
+            "<think>",
+            structural_config,
+        )
+
+        self.assertEqual(ids.dtype, np.dtype("uint32"))
+        np.testing.assert_array_equal(ids, np.array([SPECIAL_ID], dtype=np.uint32))
 
     def test_shim_rejects_unknown_encode_kwargs(self) -> None:
         tokenizer = _TokenizerShim.from_str(_tokenizer_json("<think>", "<tool>"))

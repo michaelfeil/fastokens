@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, LazyLock, RwLock},
 };
 
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyString};
@@ -134,6 +135,15 @@ impl PyEncoding {
 
     fn __repr__(&self) -> String {
         format!("Encoding(num_tokens={})", self.ids.len())
+    }
+
+    /// Move the token IDs into a NumPy uint32 array.
+    ///
+    /// This transfers ownership of the internal `ids` Vec into NumPy and leaves
+    /// `self.ids` empty. Use this when callers only need token IDs and want to
+    /// avoid materializing Python `int` objects.
+    fn to_numpy<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
+        std::mem::take(&mut self.ids).into_pyarray(py)
     }
 
     // -- Properties that raise NotImplementedError ----------------------
@@ -793,6 +803,45 @@ impl PyTokenizer {
         let n = ids.len();
 
         Py::new(py, PyEncoding::make(ids, vec![1u32; n]))
+    }
+
+    /// Encode a rendered prompt containing structural token strings and return
+    /// raw token IDs as a NumPy uint32 array.
+    ///
+    /// This skips PyEncoding construction and therefore avoids allocating
+    /// attention/type/mask vectors when callers only need IDs.
+    #[pyo3(signature = (
+        input,
+        structural_config,
+        placeholder_map = None,
+        add_special_tokens = false
+    ))]
+    fn encode_with_structural_tokens_to_numpy<'py>(
+        &self,
+        input: &str,
+        structural_config: PyRef<'_, PyStructuralTokenConfig>,
+        placeholder_map: Option<HashMap<String, String>>,
+        add_special_tokens: bool,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let placeholder_map = placeholder_map.unwrap_or_default();
+        let structural_config = Arc::clone(&structural_config.inner);
+        let ids = py
+            .allow_threads(|| {
+                let state = self.read();
+                state
+                    .inner
+                    .encode_with_structural_tokens(
+                        input,
+                        &structural_config,
+                        &placeholder_map,
+                        add_special_tokens,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(PyValueError::new_err)?;
+
+        Ok(ids.into_pyarray(py))
     }
 
     /// Encode a batch of inputs in parallel.
