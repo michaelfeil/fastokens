@@ -70,20 +70,20 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     }
 
     merge_candidates: list[_MergeCandidate] = []
-    def extract_rank_pair(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
+    def _get_rank_pair_for_sorting(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
         left_rank, right_rank, _, _ = split
         return left_rank, right_rank
 
     for token, rank in mergeable_ranks.items():
         if len(token) == 1:
             continue
-        local: list[tuple[int, int, bytes, bytes]] = []
+        split_candidates: list[tuple[int, int, bytes, bytes]] = []
         for index in range(1, len(token)):
             left = token[:index]
             right = token[index:]
             if left in mergeable_ranks and right in mergeable_ranks:
-                local.append((mergeable_ranks[left], mergeable_ranks[right], left, right))
-        local.sort(key=extract_rank_pair)
+                split_candidates.append((mergeable_ranks[left], mergeable_ranks[right], left, right))
+        split_candidates.sort(key=_get_rank_pair_for_sorting)
         merge_candidates.extend(
             _MergeCandidate(
                 rank=rank,
@@ -92,7 +92,7 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
                 left=left,
                 right=right,
             )
-            for left_rank, right_rank, left, right in local
+            for left_rank, right_rank, left, right in split_candidates
         )
 
     merge_candidates.sort(key=lambda item: (item.rank, item.left_rank, item.right_rank))
@@ -130,7 +130,7 @@ def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
 
 
 def _load_model_config(model: str | Path) -> tuple[str, dict[str, Any]]:
-    if isinstance(model, str) and urlparse(model).scheme and "://" in model:
+    if isinstance(model, str) and urlparse(model).scheme in {"http", "https", "s3", "gs", "az", "file"}:
         return model, {}
     model_path = Path(model)
     if model_path.is_dir():
