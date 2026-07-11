@@ -1,6 +1,7 @@
 import base64
 import builtins
 import json
+from pathlib import Path
 
 import pytest
 
@@ -40,7 +41,7 @@ def _create_test_encoding():
     )
 
 
-def _write_tiktoken_model(path, encoding) -> None:
+def _write_tiktoken_model(path: Path, encoding) -> None:
     path.write_text(
         "\n".join(
             f"{base64.b64encode(token).decode()} {rank}"

@@ -14,7 +14,7 @@ DEFAULT_TIKTOKEN_PATTERN = (
 PRINTABLE_ASCII_START = 33
 PRINTABLE_ASCII_END = 126
 LATIN1_DIRECT_START = 0xA1
-LATIN1_DIRECT_GAP_END = 0xAC
+LATIN1_DIRECT_END_EXCLUSIVE = 0xAD
 LATIN1_DIRECT_RESUME = 0xAE
 
 
@@ -35,7 +35,7 @@ def _byte_to_unicode() -> dict[int, str]:
         # to code points above the byte range.
         should_use_direct_mapping = (
             PRINTABLE_ASCII_START <= byte <= PRINTABLE_ASCII_END
-            or LATIN1_DIRECT_START <= byte <= LATIN1_DIRECT_GAP_END
+            or LATIN1_DIRECT_START <= byte < LATIN1_DIRECT_END_EXCLUSIVE
             or byte >= LATIN1_DIRECT_RESUME
         )
         if should_use_direct_mapping:
@@ -63,6 +63,11 @@ def _extract_encoding(encoding: Any) -> Any:
     return encoding
 
 
+def _get_rank_pair_for_sorting(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
+    left_rank, right_rank, _, _ = split
+    return left_rank, right_rank
+
+
 def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[str, int], list[list[str]]]:
     vocab = {
         _token_bytes_to_string(token): rank
@@ -70,10 +75,6 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     }
 
     merge_candidates: list[_MergeCandidate] = []
-    def _get_rank_pair_for_sorting(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
-        left_rank, right_rank, _, _ = split
-        return left_rank, right_rank
-
     for token, rank in mergeable_ranks.items():
         if len(token) == 1:
             continue
