@@ -40,7 +40,6 @@ jobs:
             ~/.cache/huggingface/hub
             ~/.cache/huggingface/xet
             ~/.cache/tokenizers
-            !~/.cache/huggingface/token
           key: ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-qwen3-0.6b-transformers-4.57.1
           restore-keys: |
             ${{ runner.os }}-py${{ matrix.python-version }}-hf-tokenizers-
@@ -61,3 +60,7 @@ jobs:
 
       - name: Run Python tests
         run: pytest python/tests -v
+
+      - name: Remove Hugging Face token before cache save
+        if: always()
+        run: rm -f ~/.cache/huggingface/token
