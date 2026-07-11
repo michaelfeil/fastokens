@@ -375,7 +375,10 @@ impl Tokenizer {
             None
         } else {
             let placeholder_tokens: Vec<String> = placeholder_map.keys().cloned().collect();
-            Some(PatternMatcher::new(&placeholder_tokens)?)
+            Some(PatternMatcher::new(
+                &placeholder_tokens,
+                "placeholder matcher",
+            )?)
         };
 
         for part in structural_tokens.structural_matcher.split(input) {
@@ -710,7 +713,7 @@ impl StructuralTokenConfig {
         non_special_added_tokens: &HashSet<String>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            structural_matcher: PatternMatcher::new(structural_tokens)?,
+            structural_matcher: PatternMatcher::new(structural_tokens, "structural-token matcher")?,
             tag_like_non_special_added_tokens: non_special_added_tokens
                 .iter()
                 .filter(|token| is_tag_like_token(token))
@@ -738,7 +741,7 @@ struct PatternMatcher {
 }
 
 impl PatternMatcher {
-    fn new(patterns: &[String]) -> Result<Self, Error> {
+    fn new(patterns: &[String], name: &str) -> Result<Self, Error> {
         let mut unique_patterns: Vec<&str> = patterns
             .iter()
             .map(String::as_str)
@@ -759,7 +762,7 @@ impl PatternMatcher {
         let matcher = DoubleArrayAhoCorasickBuilder::new()
             .match_kind(daachorse::MatchKind::LeftmostLongest)
             .build_with_values(pattern_values)
-            .map_err(|e| Error::Model(format!("error building structural-token matcher: {e}")))?;
+            .map_err(|e| Error::Model(format!("error building {name}: {e}")))?;
 
         Ok(Self {
             matcher: Some(matcher),
