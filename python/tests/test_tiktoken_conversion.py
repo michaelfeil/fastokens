@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from fastokens import Tokenizer, tiktoken_to_tokenizer_json  # noqa: E402
+from fastokens import Tokenizer, tiktoken_to_tokenizer_json
 
 
 def _encoding():
