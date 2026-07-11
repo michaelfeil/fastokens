@@ -692,7 +692,7 @@ impl PyTokenizer {
                     .map_err(|e| e.to_string())?;
                 state.do_truncate(&mut ids);
                 let target = state.single_pad_target(ids.len());
-                Ok(build_encoding(ids, state.pad.as_ref(), target))
+                Ok::<PyEncoding, String>(build_encoding(ids, state.pad.as_ref(), target))
             })
             .map_err(PyValueError::new_err)?;
 
