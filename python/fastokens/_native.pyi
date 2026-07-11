@@ -162,7 +162,8 @@ class Tokenizer:
 
         ``placeholder_map`` is per request and maps placeholder text to the
         original user text. Keep ``add_special_tokens=False`` when replacing an
-        existing rendered chat-template encode path.
+        existing rendered chat-template encode path. Backend truncation and
+        padding settings are intentionally not applied.
         """
         ...
 
