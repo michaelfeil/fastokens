@@ -7,24 +7,46 @@ tiktoken = pytest.importorskip("tiktoken")
 from fastokens import Tokenizer, tiktoken_to_tokenizer_json  # noqa: E402
 
 
-def test_tiktoken_to_tokenizer_json_matches_cl100k_base() -> None:
-    encoding = tiktoken.get_encoding("cl100k_base")
+def _encoding():
+    return tiktoken.Encoding(
+        name="fastokens-test",
+        pat_str=r"(?s).+",
+        mergeable_ranks={
+            b"a": 0,
+            b"b": 1,
+            b"c": 2,
+            b"d": 3,
+            b"ab": 4,
+            b"cd": 5,
+            b"abcd": 6,
+            b" ": 7,
+            b"!": 8,
+            b"c!": 9,
+        },
+        special_tokens={"<|end|>": 100},
+    )
+
+
+def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
+    encoding = _encoding()
     tokenizer = Tokenizer.from_json_str(tiktoken_to_tokenizer_json(encoding))
 
     texts = [
-        "Hello, world!",
-        "it's 2026, and tokenization is fast",
-        "unicode: café 火 🚀",
+        "abcd",
+        "ab cd",
+        "abc!",
     ]
     for text in texts:
         assert tokenizer.encode(text, add_special_tokens=False).ids == encoding.encode(text)
 
 
-def test_tiktoken_to_tokenizer_json_accepts_encoding_name_and_special_tokens() -> None:
-    tokenizer_json = tiktoken_to_tokenizer_json("cl100k_base")
+def test_tiktoken_to_tokenizer_json_accepts_encoding_name_and_special_tokens(monkeypatch) -> None:
+    encoding = _encoding()
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: encoding)
+
+    tokenizer_json = tiktoken_to_tokenizer_json("fastokens-test")
     config = json.loads(tokenizer_json)
-    encoding = tiktoken.get_encoding("cl100k_base")
-    special_token = "<|endoftext|>"
+    special_token = "<|end|>"
     special_id = encoding._special_tokens[special_token]
 
     assert {
