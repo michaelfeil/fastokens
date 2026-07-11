@@ -12,6 +12,7 @@ pub use self::{
 };
 
 pub(crate) use self::byte_level::BYTE_TO_CHAR;
+pub(crate) use self::split::QWEN3_SPLIT_PATTERN;
 
 /// Errors from constructing or running a pre-tokenizer.
 #[derive(Debug, thiserror::Error)]

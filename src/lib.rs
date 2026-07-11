@@ -1,6 +1,7 @@
 pub mod added_tokens;
 pub mod decoders;
 pub mod json_structs;
+mod known_tokenizers;
 pub mod models;
 pub mod normalizers;
 pub mod post_processors;
@@ -40,7 +41,7 @@ use self::{
 mod hf_hub_support {
     pub use hf_hub::api::sync::ApiError;
 
-    use super::{Error, Tokenizer, TokenizerJson};
+    use super::{Error, Tokenizer, TokenizerJson, known_tokenizers};
     use hf_hub::api::sync::{Api, ApiBuilder};
     use std::fs;
 
@@ -70,8 +71,13 @@ mod hf_hub_support {
         validate_model_id(model)?;
         let api = make_api(token)?;
         let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        let raw = fs::read_to_string(json_path)?;
+        let raw = match repo.get("tokenizer.json") {
+            Ok(json_path) => fs::read_to_string(json_path)?,
+            Err(err) => match known_tokenizers::vendored_tokenizer_json(model) {
+                Some(raw) => raw.to_string(),
+                None => return Err(err.into()),
+            },
+        };
         let json: TokenizerJson = serde_json::from_str(&raw)?;
         Tokenizer::build(json)
     }
@@ -82,8 +88,13 @@ mod hf_hub_support {
         validate_model_id(model)?;
         let api = make_api(None)?;
         let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        Ok(fs::read_to_string(json_path)?)
+        match repo.get("tokenizer.json") {
+            Ok(json_path) => Ok(fs::read_to_string(json_path)?),
+            Err(err) => match known_tokenizers::vendored_tokenizer_json(model) {
+                Some(raw) => Ok(raw.to_string()),
+                None => Err(err.into()),
+            },
+        }
     }
 }
 
@@ -127,6 +138,7 @@ pub struct Tokenizer {
     model: Model,
     post_processor: Option<PostProcessor>,
     decoder: Option<Decoder>,
+    known_tokenizer: Option<known_tokenizers::KnownTokenizer>,
     /// When the pre-tokenizer is `Sequence([Split, ByteLevel(bulk)])`,
     /// we store a Split-only pre-tokenizer and fuse ByteLevel into BPE.
     split_only: Option<PreTokenizer>,
@@ -135,6 +147,7 @@ pub struct Tokenizer {
 impl Tokenizer {
     /// Build the pipeline steps from a parsed JSON config.
     fn build(json: TokenizerJson) -> Result<Self, Error> {
+        let known_tokenizer = known_tokenizers::fingerprint(&json);
         let added_tokens = AddedTokens::from_configs(&json.added_tokens).map_err(Error::Model)?;
         let normalizer = json.normalizer.map(Normalizer::from_config).transpose()?;
         let pre_tokenizer = json
@@ -158,6 +171,7 @@ impl Tokenizer {
             model,
             post_processor,
             decoder,
+            known_tokenizer,
             split_only,
         })
     }
@@ -247,6 +261,11 @@ impl Tokenizer {
     /// Return the decoder, if any.
     pub fn decoder(&self) -> Option<&Decoder> {
         self.decoder.as_ref()
+    }
+
+    /// Return the frozen-tokenizer fast-path family detected for this tokenizer.
+    pub fn known_tokenizer_name(&self) -> Option<&'static str> {
+        self.known_tokenizer.map(|known| known.name())
     }
 
     // ── Encoding ─────────────────────────────────────────────────────
