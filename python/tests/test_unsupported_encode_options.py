@@ -6,6 +6,9 @@ from fastokens._compat import _TokenizerShim
 from test_async_stub import TOKENIZER_JSON
 
 
+HELLO_TOKEN_ID = 11
+
+
 def test_encode_accepts_split_special_tokens_true_as_noop_without_added_tokens() -> None:
     tokenizer = _TokenizerShim.from_str(TOKENIZER_JSON)
 
@@ -40,20 +43,13 @@ def test_encode_rejects_unknown_kwargs() -> None:
         tokenizer.encode("hello", return_offsets_mapping=True)
 
 
-def test_encode_rejects_wrong_type_split_special_tokens() -> None:
-    tokenizer = _TokenizerShim.from_str(TOKENIZER_JSON)
-
-    with pytest.raises(TypeError, match="split_special_tokens must be a bool"):
-        tokenizer.encode("hello", split_special_tokens="False")
-
-
 def test_encode_special_tokens_true_is_supported() -> None:
     tokenizer = _TokenizerShim.from_str(TOKENIZER_JSON)
 
     tokenizer.encode_special_tokens = True
 
     assert tokenizer.encode_special_tokens is True
-    assert tokenizer.encode("hello").ids == [11]
+    assert tokenizer.encode("hello").ids == [HELLO_TOKEN_ID]
 
 
 def test_encode_special_tokens_false_is_noop() -> None:
@@ -62,13 +58,6 @@ def test_encode_special_tokens_false_is_noop() -> None:
     tokenizer.encode_special_tokens = False
 
     assert tokenizer.encode_special_tokens is False
-
-
-def test_encode_special_tokens_rejects_wrong_type() -> None:
-    tokenizer = _TokenizerShim.from_str(TOKENIZER_JSON)
-
-    with pytest.raises(TypeError, match="encode_special_tokens must be a bool"):
-        tokenizer.encode_special_tokens = 1
 
 
 def test_pickle_restores_stored_encode_special_tokens_true() -> None:

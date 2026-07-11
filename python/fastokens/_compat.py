@@ -26,18 +26,6 @@ def _reject_unsupported_kwargs(kwargs: dict) -> None:
         raise TypeError(f"unsupported fastokens encode option(s): {names}")
 
 
-def _validate_bool_option(name: str, value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    raise TypeError(f"{name} must be a bool")
-
-
-def _validate_optional_bool_option(name: str, value: object) -> bool | None:
-    if value is None:
-        return None
-    return _validate_bool_option(name, value)
-
-
 # ---------------------------------------------------------------------------
 # _TokenizerShim
 # ---------------------------------------------------------------------------
@@ -58,14 +46,12 @@ class _TokenizerShim:
         elif isinstance(src, _TokenizerShim):
             self._json = src._json
             self._fast = Tokenizer.from_json_str(src._json)
+            self._encode_special_tokens = src._encode_special_tokens
         elif hasattr(src, "to_str"):
             # Accept a real tokenizers.Tokenizer (e.g. from convert_slow_tokenizer).
             self._json = src.to_str()
             self._fast = Tokenizer.from_json_str(self._json)
-            self._encode_special_tokens = _validate_bool_option(
-                "encode_special_tokens",
-                getattr(src, "encode_special_tokens", False),
-            )
+            self._encode_special_tokens = getattr(src, "encode_special_tokens", False)
         else:
             raise TypeError(
                 f"expected JSON string, _TokenizerShim, or tokenizers.Tokenizer; "
@@ -163,9 +149,7 @@ class _TokenizerShim:
 
     @encode_special_tokens.setter
     def encode_special_tokens(self, value: bool) -> None:
-        self._encode_special_tokens = _validate_bool_option(
-            "encode_special_tokens", value
-        )
+        self._encode_special_tokens = value
 
     # -- Truncation / Padding -------------------------------------------
 
@@ -238,9 +222,6 @@ class _TokenizerShim:
         **kwargs,
     ) -> Encoding:
         _reject_unsupported_kwargs(kwargs)
-        split_special_tokens = _validate_optional_bool_option(
-            "split_special_tokens", split_special_tokens
-        )
         if pair is not None:
             raise NotImplementedError("pair encoding is not supported by fastokens")
         if is_pretokenized:
@@ -262,9 +243,6 @@ class _TokenizerShim:
         **kwargs,
     ) -> list[Encoding]:
         _reject_unsupported_kwargs(kwargs)
-        split_special_tokens = _validate_optional_bool_option(
-            "split_special_tokens", split_special_tokens
-        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
@@ -284,9 +262,6 @@ class _TokenizerShim:
         add_special_tokens: bool = True,
         split_special_tokens: bool | None = None,
     ) -> list[Encoding]:
-        split_special_tokens = _validate_optional_bool_option(
-            "split_special_tokens", split_special_tokens
-        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
@@ -306,9 +281,6 @@ class _TokenizerShim:
         add_special_tokens: bool = True,
         split_special_tokens: bool | None = None,
     ) -> list[Encoding]:
-        split_special_tokens = _validate_optional_bool_option(
-            "split_special_tokens", split_special_tokens
-        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"

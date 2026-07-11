@@ -220,8 +220,14 @@ class SplitSpecialTokensTests(unittest.TestCase):
                 tokenizer = _TokenizerShim.from_str(tokenizer_json)
                 tokenizer.encode_special_tokens = True
 
+                wrapped = _TokenizerShim(tokenizer)
                 copied = deepcopy(tokenizer)
 
+                self.assertTrue(wrapped.encode_special_tokens)
+                self.assertEqual(
+                    wrapped.encode(special_token, add_special_tokens=False).ids,
+                    _char_ids(tokenizer_json, special_token),
+                )
                 self.assertTrue(copied.encode_special_tokens)
                 self.assertEqual(
                     copied.encode(special_token, add_special_tokens=False).ids,

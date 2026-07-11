@@ -14,6 +14,7 @@ use crate::json_structs::AddedTokenConfig;
 pub struct AddedTokens {
     all: AddedTokenMatcher,
     non_special: Option<AddedTokenMatcher>,
+    has_special_tokens: bool,
     /// Token lengths (in bytes) indexed by token ID, for matched tokens only.
     /// Non-added token IDs map to 0.
     token_lens: Vec<usize>,
@@ -220,13 +221,20 @@ impl AddedTokens {
             debug_assert!(false, "non-empty configs should produce token patterns");
             return Ok(None);
         };
-        // Keep a second matcher for split_special_tokens=true. This costs
-        // extra DAAC memory, but keeps the encode hot path branch-free.
-        let non_special = AddedTokenMatcher::new(non_special_patterns)?;
+        let has_special_tokens = !special_ids.is_empty();
+        // Keep a second matcher only when special tokens must be excluded for
+        // split_special_tokens=true. Tokenizers with no special added tokens
+        // can reuse the full matcher.
+        let non_special = if has_special_tokens {
+            AddedTokenMatcher::new(non_special_patterns)?
+        } else {
+            None
+        };
 
         Ok(Some(Self {
             all,
             non_special,
+            has_special_tokens,
             token_lens,
             id_to_content,
             content_to_id,
@@ -291,6 +299,10 @@ impl AddedTokens {
     pub fn split_special_as_text<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
         if input.is_empty() {
             return Vec::new();
+        }
+
+        if !self.has_special_tokens {
+            return self.all.split(input);
         }
 
         match &self.non_special {
@@ -539,6 +551,17 @@ mod tests {
             vec![Segment::Text("a<think>b")]
         );
         assert!(at.split_special_as_text("").is_empty());
+    }
+
+    #[test]
+    fn split_special_as_text_with_no_special_tokens_uses_all_matches() {
+        let plain = make_config(1, "<extra>");
+        let at = AddedTokens::from_configs(&[plain]).unwrap().unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("a<extra>b"),
+            vec![Segment::Text("a"), Segment::Token(1), Segment::Text("b")]
+        );
     }
 
     #[test]
