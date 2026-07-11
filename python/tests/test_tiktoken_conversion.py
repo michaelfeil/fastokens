@@ -7,6 +7,18 @@ import pytest
 from fastokens import Tokenizer, tiktoken_model_to_tokenizer_json, tiktoken_to_tokenizer_json
 
 
+@pytest.fixture
+def hide_tiktoken(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_import = builtins.__import__
+
+    def import_without_tiktoken(name, *args, **kwargs):
+        if name == "tiktoken" or name.startswith("tiktoken."):
+            raise ImportError("No module named 'tiktoken'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
+
+
 def _encoding():
     tiktoken = pytest.importorskip("tiktoken")
     return tiktoken.Encoding(
@@ -74,17 +86,8 @@ def test_tiktoken_to_tokenizer_json_preserves_special_tokens() -> None:
 
 
 def test_tiktoken_to_tokenizer_json_returns_none_without_optional_tiktoken(
-    monkeypatch: pytest.MonkeyPatch,
+    hide_tiktoken,
 ) -> None:
-    original_import = builtins.__import__
-
-    def import_without_tiktoken(name, *args, **kwargs):
-        if name == "tiktoken":
-            raise ImportError("No module named 'tiktoken'")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
-
     assert tiktoken_to_tokenizer_json("cl100k_base") is None
 
 
@@ -142,17 +145,8 @@ def test_tiktoken_model_to_tokenizer_json_reads_model_directory(tmp_path) -> Non
 
 
 def test_tiktoken_model_to_tokenizer_json_returns_none_without_optional_tiktoken(
-    monkeypatch: pytest.MonkeyPatch,
+    hide_tiktoken,
 ) -> None:
-    original_import = builtins.__import__
-
-    def import_without_tiktoken(name, *args, **kwargs):
-        if name == "tiktoken" or name.startswith("tiktoken."):
-            raise ImportError("No module named 'tiktoken'")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
-
     assert tiktoken_model_to_tokenizer_json("tiktoken.model") is None
 
 
@@ -168,5 +162,5 @@ def test_tiktoken_model_to_tokenizer_json_raises_for_invalid_file(tmp_path) -> N
     model_path = tmp_path / "tiktoken.model"
     model_path.write_text("not-a-valid-model-line")
 
-    with pytest.raises(ValueError, match="Error parsing line"):
+    with pytest.raises(ValueError, match="invalid tiktoken model"):
         tiktoken_model_to_tokenizer_json(model_path)

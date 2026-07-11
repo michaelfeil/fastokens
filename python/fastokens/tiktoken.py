@@ -218,7 +218,10 @@ def tiktoken_model_to_tokenizer_json(
     model_path, config = _load_model_config(model)
     pattern = pattern or config.get("pat_str") or config.get("pattern") or DEFAULT_TIKTOKEN_PATTERN
     special_tokens = _config_special_tokens(config) if special_tokens is None else special_tokens
-    mergeable_ranks = load_tiktoken_bpe(model_path)
+    try:
+        mergeable_ranks = load_tiktoken_bpe(model_path)
+    except ValueError as exc:
+        raise ValueError(f"invalid tiktoken model {model_path!r}: {exc}") from exc
     return _tokenizer_json_from_parts(mergeable_ranks, pattern, special_tokens, pretty=pretty)
 
 
