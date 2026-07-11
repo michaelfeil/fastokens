@@ -9,12 +9,11 @@ pub mod pre_tokenizers;
 
 use std::{fs, path::Path};
 
-use hf_hub::api::sync::Api;
 use rayon::prelude::*;
 use serde_json::Value;
 
 pub use self::{
-    added_tokens::AddedTokens,
+    added_tokens::{AddedTokenInfo, AddedTokens},
     json_structs::{
         AddedTokenConfig, DecoderConfig, DecoderKind, ModelConfig, ModelKind, NormalizerConfig,
         NormalizerKind, PostProcessorConfig, PostProcessorKind, PreTokenizerConfig,
@@ -32,11 +31,63 @@ use self::{
     pre_tokenized::{PreTokenizedString, Split as PtSplit},
 };
 
+#[cfg(feature = "hf-hub")]
+mod hf_hub_support {
+    pub use hf_hub::api::sync::ApiError;
+
+    use super::{Error, Tokenizer, TokenizerJson};
+    use hf_hub::api::sync::{Api, ApiBuilder};
+    use std::fs;
+
+    /// Build an `hf-hub` [`Api`] client, optionally overriding the token that
+    /// would otherwise be read from the local HuggingFace credential cache
+    /// (`~/.cache/huggingface/token`).
+    pub(super) fn make_api(token: Option<&str>) -> Result<Api, ApiError> {
+        match token {
+            Some(t) => ApiBuilder::new().with_token(Some(t.to_owned())).build(),
+            None => Api::new(),
+        }
+    }
+
+    /// Validate that the model identifier is well-formed.
+    fn validate_model_id(model: &str) -> Result<(), Error> {
+        if model.contains("..") {
+            return Err(Error::InvalidIdentifier(
+                "model identifier must not contain \"..\"".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Used by `Tokenizer::from_model` and `Tokenizer::from_model_with_token` to fetch
+    /// `tokenizer.json` from the HuggingFace Hub and build a `Tokenizer`.
+    pub fn from_model_with_token(model: &str, token: Option<&str>) -> Result<Tokenizer, Error> {
+        validate_model_id(model)?;
+        let api = make_api(token)?;
+        let repo = api.model(model.to_string());
+        let json_path = repo.get("tokenizer.json")?;
+        let raw = fs::read_to_string(json_path)?;
+        let json: TokenizerJson = serde_json::from_str(&raw)?;
+        Tokenizer::build(json)
+    }
+
+    /// Used by the Python layer to fetch `tokenizer.json` from the HuggingFace Hub and
+    /// build a `Tokenizer`.
+    pub fn download_tokenizer_json(model: &str) -> Result<String, Error> {
+        validate_model_id(model)?;
+        let api = make_api(None)?;
+        let repo = api.model(model.to_string());
+        let json_path = repo.get("tokenizer.json")?;
+        Ok(fs::read_to_string(json_path)?)
+    }
+}
+
 /// Errors that can occur when constructing a [`Tokenizer`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(feature = "hf-hub")]
     #[error("failed to download tokenizer files: {0}")]
-    Hub(#[from] hf_hub::api::sync::ApiError),
+    Hub(#[from] hf_hub_support::ApiError),
 
     #[error("failed to read tokenizer files: {0}")]
     Io(#[from] std::io::Error),
@@ -58,9 +109,6 @@ pub enum Error {
 
     #[error("model error: {0}")]
     Model(String),
-
-    #[error("decode error: {0}")]
-    Decode(String),
 
     #[error("invalid model identifier: {0}")]
     InvalidIdentifier(String),
@@ -141,33 +189,29 @@ impl Tokenizer {
 
     /// Download `tokenizer.json` from HuggingFace Hub for the given model (e.g.
     /// `"meta-llama/Llama-3.1-8B"`) and create a tokenizer with it.
+    ///
+    /// Authentication is resolved automatically from `~/.cache/huggingface/token`
+    /// (set via `huggingface-cli login`).  To supply a token explicitly, use
+    /// [`Self::from_model_with_token`].
+    #[cfg(feature = "hf-hub")]
     pub fn from_model(model: &str) -> Result<Self, Error> {
-        if model.contains("..") {
-            return Err(Error::InvalidIdentifier(
-                "model identifier must not contain \"..\"".into(),
-            ));
-        }
-        let api = Api::new()?;
-        let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        let raw = fs::read_to_string(json_path)?;
-        let json: TokenizerJson = serde_json::from_str(&raw)?;
-        Self::build(json)
+        Self::from_model_with_token(model, None)
+    }
+
+    /// Like [`Self::from_model`] but accepts an explicit HuggingFace token,
+    /// overriding the credential cache.  Pass `None` to use the credential
+    /// cache (`~/.cache/huggingface/token`, set via `huggingface-cli login`).
+    #[cfg(feature = "hf-hub")]
+    pub fn from_model_with_token(model: &str, token: Option<&str>) -> Result<Self, Error> {
+        hf_hub_support::from_model_with_token(model, token)
     }
 
     /// Download `tokenizer.json` and return its raw content without building
     /// the tokenizer.  Used by the Python layer to extract fields (such as
     /// `post_processor`) before handing the JSON off to [`Self::from_json`].
+    #[cfg(feature = "hf-hub")]
     pub fn download_tokenizer_json(model: &str) -> Result<String, Error> {
-        if model.contains("..") {
-            return Err(Error::InvalidIdentifier(
-                "model identifier must not contain \"..\"".into(),
-            ));
-        }
-        let api = Api::new()?;
-        let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        Ok(fs::read_to_string(json_path)?)
+        hf_hub_support::download_tokenizer_json(model)
     }
 
     /// Return the normalizer, if any.
@@ -188,6 +232,11 @@ impl Tokenizer {
     /// Return the tokenization model.
     pub fn model(&self) -> &Model {
         &self.model
+    }
+
+    /// Return the compiled added-token set, if any.
+    pub fn added_tokens(&self) -> Option<&AddedTokens> {
+        self.added_tokens.as_ref()
     }
 
     /// Return the decoder, if any.
@@ -288,10 +337,13 @@ impl Tokenizer {
             {
                 continue;
             }
-            let token_str = self
-                .id_to_token(id)
-                .ok_or_else(|| Error::Decode(format!("unknown token ID: {id}")))?;
-            tokens.push(token_str.to_string());
+            // Match HuggingFace behavior: silently skip unknown IDs (e.g.
+            // models like Qwen3-0.6B-FP8 emit IDs in the gap between
+            // tokenizer.json's vocab and the embedding matrix). Erroring
+            // here would kill streaming generation on a single bad token.
+            if let Some(token_str) = self.id_to_token(id) {
+                tokens.push(token_str.to_string());
+            }
         }
 
         match &self.decoder {
@@ -355,6 +407,13 @@ impl Tokenizer {
         let model_size = self.model.vocab_size();
         let added_size = self.added_tokens.as_ref().map_or(0, |at| at.len());
         model_size + added_size
+    }
+
+    /// Return whether this token ID is marked special in the added-token set.
+    pub fn is_special_token(&self, id: u32) -> bool {
+        self.added_tokens
+            .as_ref()
+            .is_some_and(|added_tokens| added_tokens.is_special(id))
     }
 
     // ── Internal helpers ─────────────────────────────────────────────
@@ -534,8 +593,10 @@ pub fn decode_stream_step(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hf-hub"))]
 mod tests {
+    use crate::hf_hub_support::make_api;
+
     use super::*;
 
     const HF_MODELS: &[&str] = &[
@@ -549,6 +610,7 @@ mod tests {
         "Qwen/Qwen3-Coder-480B-A35B-Instruct",
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         "nvidia/Qwen3-Nemotron-235B-A22B-GenRM",
+        "hoangquan456/Kimi-K2.5",
     ];
 
     /// Verify that `TokenizerConfig` and `TokenizerJson` deserialize
@@ -557,7 +619,7 @@ mod tests {
     /// unsupported step types).
     #[test]
     fn parse_hf_json() {
-        let api = Api::new().unwrap();
+        let api = make_api(None).unwrap();
         for model in HF_MODELS {
             let repo = api.model(model.to_string());
             let json_path = repo
@@ -603,6 +665,30 @@ mod tests {
             .token_to_id(token_str)
             .expect("reverse lookup should work");
         assert_eq!(id, 0);
+    }
+
+    #[test]
+    fn public_added_token_accessors_expose_added_vocab() {
+        let tok = Tokenizer::from_model("Qwen/Qwen3-0.6B").unwrap();
+        let added_tokens = tok.added_tokens().expect("expected added tokens");
+
+        let think_id = tok.token_to_id("<think>").expect("<think> should exist");
+        assert_eq!(added_tokens.token_to_id("<think>"), Some(think_id));
+        assert_eq!(added_tokens.id_to_token(think_id), Some("<think>"));
+
+        let mut entries: Vec<_> = added_tokens.iter().collect();
+        entries.sort_by_key(|entry| entry.id);
+        let special_entry = entries
+            .iter()
+            .find(|entry| entry.special)
+            .expect("expected at least one special added token");
+        assert!(tok.is_special_token(special_entry.id));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.id == think_id && entry.content == "<think>"),
+            "added-token iterator should expose <think>"
+        );
     }
 
     // ── Correctness tests against HuggingFace tokenizers ─────────────
@@ -900,6 +986,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn correctness_kimi_k2_5() {
+        let f = compare_encode_decode("hoangquan456/Kimi-K2.5", CORPUS);
+        assert!(f.is_empty(), "hoangquan456/Kimi-K2.5:\n{}", f.join("\n"));
+    }
+
     // ── Cache consistency ────────────────────────────────────────────
 
     /// Verify that encoding the same input twice produces identical results,
@@ -1145,7 +1237,7 @@ mod tests {
     fn extended_corpus() -> &'static ExtendedCorpus {
         static CORPUS: OnceLock<ExtendedCorpus> = OnceLock::new();
         CORPUS.get_or_init(|| {
-            let api = Api::new().unwrap();
+            let api = make_api(None).unwrap();
 
             // LongBench-v2: first 100 samples
             let lb_repo = api.dataset("zai-org/LongBench-v2".to_string());
@@ -1585,11 +1677,29 @@ mod tests {
         );
     }
 
-    /// decode of an unknown ID returns an error rather than panicking.
+    /// decode of an unknown ID silently skips it, matching HuggingFace.
     #[test]
-    fn decode_unknown_id_returns_error() {
+    fn decode_unknown_id_is_skipped() {
         let tok = Tokenizer::from_model("Qwen/Qwen3-0.6B").unwrap();
-        assert!(tok.decode(&[u32::MAX], false).is_err());
+        assert_eq!(tok.decode(&[u32::MAX], false).unwrap(), "");
+    }
+
+    /// decode interleaves valid tokens with unknown IDs, dropping only the bad ones.
+    #[test]
+    fn decode_mixed_valid_and_unknown_ids() {
+        let tok = Tokenizer::from_model("Qwen/Qwen3-0.6B").unwrap();
+        let valid = tok.encode_with_special_tokens("hello", false).unwrap();
+        let mut mixed = valid.clone();
+        mixed.push(u32::MAX);
+        mixed.extend(tok.encode_with_special_tokens(" world", false).unwrap());
+        let expected = tok.decode(&valid, false).unwrap()
+            + &tok
+                .decode(
+                    &tok.encode_with_special_tokens(" world", false).unwrap(),
+                    false,
+                )
+                .unwrap();
+        assert_eq!(tok.decode(&mixed, false).unwrap(), expected);
     }
 
     /// id_to_token / token_to_id round-trip for sampled IDs across all models.
@@ -1802,6 +1912,27 @@ mod tests {
             }
         }
         assert_eq!(chunks.concat(), text);
+    }
+
+    /// Streaming decode silently skips unknown IDs instead of erroring, so
+    /// a single OOV token (e.g. emitted in the gap between tokenizer vocab
+    /// and embedding matrix on some Qwen FP8 checkpoints) doesn't kill the
+    /// whole generation. Matches HuggingFace DecodeStream behavior.
+    #[test]
+    fn decode_stream_unknown_id_does_not_error() {
+        let tok = stream_tok();
+        let mut buf = Vec::new();
+        let mut prefix = String::new();
+        let mut prefix_index = 0usize;
+        let result = super::decode_stream_step(
+            &tok,
+            vec![u32::MAX],
+            false,
+            &mut buf,
+            &mut prefix,
+            &mut prefix_index,
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
     #[test]
