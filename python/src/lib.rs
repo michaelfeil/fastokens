@@ -470,12 +470,6 @@ impl TokenizerState {
             .collect())
     }
 
-    fn build_single_encoding(&self, mut ids: Vec<u32>) -> PyEncoding {
-        self.do_truncate(&mut ids);
-        let target = self.single_pad_target(ids.len());
-        build_encoding(ids, self.pad.as_ref(), target)
-    }
-
     /// Parse `json`, update the Rust post-processor in place, and cache the JSON.
     fn update_post_processor_json(&mut self, json: &str) -> PyResult<()> {
         use fastokens::json_structs::PostProcessorConfig;
@@ -777,10 +771,10 @@ impl PyTokenizer {
     ) -> PyResult<Py<PyEncoding>> {
         let placeholder_map = placeholder_map.unwrap_or_default();
         let structural_config = Arc::clone(&structural_config.inner);
-        let encoding = py
+        let ids = py
             .allow_threads(|| {
                 let state = self.read();
-                let ids = state
+                state
                     .inner
                     .encode_with_structural_tokens(
                         input,
@@ -788,12 +782,12 @@ impl PyTokenizer {
                         &placeholder_map,
                         add_special_tokens,
                     )
-                    .map_err(|e| e.to_string())?;
-                Ok::<PyEncoding, String>(state.build_single_encoding(ids))
+                    .map_err(|e| e.to_string())
             })
             .map_err(PyValueError::new_err)?;
+        let n = ids.len();
 
-        Py::new(py, encoding)
+        Py::new(py, PyEncoding::make(ids, vec![1u32; n]))
     }
 
     /// Encode a batch of inputs in parallel.

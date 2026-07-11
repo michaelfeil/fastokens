@@ -305,6 +305,26 @@ class SplitSpecialTokensTests(unittest.TestCase):
             ],
         )
 
+    def test_native_encode_with_structural_tokens_ignores_padding_and_truncation(
+        self,
+    ) -> None:
+        tokenizer_json = _tokenizer_json("<think>", "<tool>")
+        tokenizer = Tokenizer.from_json_str(tokenizer_json)
+        tokenizer.enable_truncation(max_length=2)
+        tokenizer.enable_padding(length=8, pad_id=99)
+        structural_config = StructuralTokenConfig({"<think>"})
+
+        encoding = tokenizer.encode_with_structural_tokens(
+            "hello <think>",
+            structural_config,
+        )
+
+        self.assertEqual(
+            encoding.ids,
+            [*_char_ids(tokenizer_json, "hello "), SPECIAL_ID],
+        )
+        self.assertEqual(encoding.attention_mask, [1] * len(encoding.ids))
+
     def test_shim_forwards_encode_with_structural_tokens(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
         tokenizer = _TokenizerShim.from_str(tokenizer_json)
