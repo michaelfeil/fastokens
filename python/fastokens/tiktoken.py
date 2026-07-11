@@ -16,6 +16,9 @@ def _byte_to_unicode() -> dict[int, str]:
     table: dict[int, str] = {}
     next_codepoint = 256
     for byte in range(256):
+        # Match the GPT-2 byte-level alphabet: printable ASCII plus most
+        # Latin-1 bytes are kept as-is, while whitespace/control bytes map
+        # to code points above the byte range.
         should_use_direct_mapping = 33 <= byte <= 126 or 0xA1 <= byte <= 0xAC or byte >= 0xAE
         if should_use_direct_mapping:
             table[byte] = chr(byte)

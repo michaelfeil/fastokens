@@ -56,7 +56,7 @@ def test_tiktoken_to_tokenizer_json_preserves_special_tokens() -> None:
     tokenizer_json = tiktoken_to_tokenizer_json(encoding)
     config = json.loads(tokenizer_json)
     special_token = "<|end|>"
-    special_id = encoding._special_tokens[special_token]
+    special_id = 100
 
     assert {
         "id": special_id,
