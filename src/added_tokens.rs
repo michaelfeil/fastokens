@@ -289,9 +289,12 @@ impl AddedTokens {
     /// special-token strings are tokenized through the normal model pipeline,
     /// while non-special added tokens can still match as added tokens.
     pub fn split_special_as_text<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+
         match &self.non_special {
             Some(non_special) => non_special.split(input),
-            None if input.is_empty() => Vec::new(),
             None => vec![Segment::Text(input)],
         }
     }
