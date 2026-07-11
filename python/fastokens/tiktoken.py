@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, NamedTuple
+
+DEFAULT_TIKTOKEN_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|"
+    r"\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|"
+    r"\s+(?!\S)|\s+"
+)
 
 
 class _MergeCandidate(NamedTuple):
@@ -81,28 +89,50 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     return vocab, merges
 
 
-def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | None:
-    """
-    Convert a ``tiktoken`` encoding to a Hugging Face ``tokenizer.json`` string.
+def _normalise_special_tokens(special_tokens: Mapping[str, int] | None) -> dict[str, int]:
+    if special_tokens is None:
+        return {}
+    return dict(special_tokens)
 
-    ``encoding`` may be either a ``tiktoken.Encoding`` instance or an encoding
-    name accepted by ``tiktoken.get_encoding``. Passing an encoding name returns
-    ``None`` if the optional ``tiktoken`` package is not installed. The returned
-    JSON can be passed directly to ``fastokens.Tokenizer.from_json_str``.
-    """
-    encoding = _extract_encoding(encoding)
-    if encoding is None:
-        return None
-    try:
-        mergeable_ranks = encoding._mergeable_ranks
-        pattern = encoding._pat_str
-        special_tokens = encoding._special_tokens
-    except AttributeError as exc:
-        raise TypeError(
-            "expected a tiktoken.Encoding or encoding name with "
-            "_mergeable_ranks, _pat_str, and _special_tokens"
-        ) from exc
 
+def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
+    special_tokens: dict[str, int] = {}
+    added_tokens_decoder = config.get("added_tokens_decoder", {})
+    if isinstance(added_tokens_decoder, dict):
+        for token_id, token_config in added_tokens_decoder.items():
+            try:
+                token_id_int = int(token_id)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(token_config, dict):
+                content = token_config.get("content")
+                is_special = token_config.get("special", True)
+            else:
+                content = token_config
+                is_special = True
+            if isinstance(content, str) and is_special:
+                special_tokens[content] = token_id_int
+    return special_tokens
+
+
+def _load_model_config(model: str | Path) -> tuple[str, dict[str, Any]]:
+    if isinstance(model, str) and "://" in model:
+        return model, {}
+    model_path = Path(model)
+    if model_path.is_dir():
+        config_path = model_path / "tokenizer_config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        return str(model_path / "tiktoken.model"), config
+    return str(model), {}
+
+
+def _tokenizer_json_from_parts(
+    mergeable_ranks: dict[bytes, int],
+    pattern: str,
+    special_tokens: Mapping[str, int] | None,
+    *,
+    pretty: bool = False,
+) -> str:
     vocab, merges = _extract_vocab_and_merges(mergeable_ranks)
     added_tokens = [
         {
@@ -114,7 +144,7 @@ def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | 
             "normalized": False,
             "special": True,
         }
-        for token, token_id in sorted(special_tokens.items(), key=lambda item: item[1])
+        for token, token_id in sorted(_normalise_special_tokens(special_tokens).items(), key=lambda item: item[1])
     ]
 
     tokenizer_json = {
@@ -163,3 +193,55 @@ def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | 
     if pretty:
         return json.dumps(tokenizer_json, indent=2, ensure_ascii=False)
     return json.dumps(tokenizer_json, ensure_ascii=False)
+
+
+def tiktoken_model_to_tokenizer_json(
+    model: str | Path,
+    *,
+    pattern: str | None = None,
+    special_tokens: Mapping[str, int] | None = None,
+    pretty: bool = False,
+) -> str | None:
+    """
+    Convert a ``tiktoken.model`` BPE file to a Hugging Face ``tokenizer.json`` string.
+
+    ``model`` may point to a local ``tiktoken.model`` file, a URL accepted by
+    ``tiktoken.load.load_tiktoken_bpe``, or a local directory containing
+    ``tiktoken.model`` and optionally ``tokenizer_config.json``. Passing a model
+    path returns ``None`` if the optional ``tiktoken`` package is not installed.
+    """
+    try:
+        from tiktoken.load import load_tiktoken_bpe
+    except ImportError:
+        return None
+
+    model_path, config = _load_model_config(model)
+    pattern = pattern or config.get("pat_str") or config.get("pattern") or DEFAULT_TIKTOKEN_PATTERN
+    special_tokens = _config_special_tokens(config) if special_tokens is None else special_tokens
+    mergeable_ranks = load_tiktoken_bpe(model_path)
+    return _tokenizer_json_from_parts(mergeable_ranks, pattern, special_tokens, pretty=pretty)
+
+
+def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | None:
+    """
+    Convert a ``tiktoken`` encoding to a Hugging Face ``tokenizer.json`` string.
+
+    ``encoding`` may be either a ``tiktoken.Encoding`` instance or an encoding
+    name accepted by ``tiktoken.get_encoding``. Passing an encoding name returns
+    ``None`` if the optional ``tiktoken`` package is not installed. The returned
+    JSON can be passed directly to ``fastokens.Tokenizer.from_json_str``.
+    """
+    encoding = _extract_encoding(encoding)
+    if encoding is None:
+        return None
+    try:
+        mergeable_ranks = encoding._mergeable_ranks
+        pattern = encoding._pat_str
+        special_tokens = encoding._special_tokens
+    except AttributeError as exc:
+        raise TypeError(
+            "expected a tiktoken.Encoding or encoding name with "
+            "_mergeable_ranks, _pat_str, and _special_tokens"
+        ) from exc
+
+    return _tokenizer_json_from_parts(mergeable_ranks, pattern, special_tokens, pretty=pretty)
