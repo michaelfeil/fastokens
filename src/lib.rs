@@ -1592,6 +1592,36 @@ mod tests {
     }
 
     #[test]
+    fn encode_with_structural_tokens_keeps_restored_bare_non_special_added_tokens() {
+        let tok = structural_test_tokenizer();
+        let structural_config = StructuralTokenConfig::new(
+            &["<think>".to_string()],
+            &HashSet::from(["magic".to_string()]),
+        )
+        .unwrap();
+        let placeholder = "\u{e000}STRUCTTOK_0\u{e000}".to_string();
+        let placeholder_map = HashMap::from([(placeholder.clone(), "magic".to_string())]);
+
+        let ids = tok
+            .encode_with_structural_tokens(
+                &format!("hello {placeholder} <think>"),
+                &structural_config,
+                &placeholder_map,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ids,
+            vec![
+                4, 3, 7, 7, 9, 0,   // "hello "
+                103, // restored bare non-special added token "magic"
+                0, 101, // structural " <think>"
+            ]
+        );
+    }
+
+    #[test]
     fn encode_with_structural_tokens_preserves_merges_across_placeholders() {
         let tok = structural_test_tokenizer();
         let structural_config =
