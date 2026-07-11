@@ -229,6 +229,7 @@ class _TokenizerShim:
         pair: str | None = None,
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
         **kwargs,
     ) -> Encoding:
         _reject_unsupported_encode_kwargs(kwargs)
@@ -236,13 +237,18 @@ class _TokenizerShim:
             raise NotImplementedError("pair encoding is not supported by fastokens")
         if is_pretokenized:
             raise NotImplementedError("pre-tokenized input is not supported by fastokens")
-        return self._fast.encode(sequence, add_special_tokens=add_special_tokens)
+        return self._fast.encode(
+            sequence,
+            add_special_tokens=add_special_tokens,
+            split_special_tokens=split_special_tokens,
+        )
 
     def encode_batch(
         self,
         inputs: list,
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
         **kwargs,
     ) -> list[Encoding]:
         _reject_unsupported_encode_kwargs(kwargs)
@@ -250,32 +256,44 @@ class _TokenizerShim:
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
-        return self._fast.encode_batch(inputs, add_special_tokens=add_special_tokens)
+        return self._fast.encode_batch(
+            inputs,
+            add_special_tokens=add_special_tokens,
+            split_special_tokens=split_special_tokens,
+        )
 
     def encode_batch_fast(
         self,
         inputs: list[str],
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
     ) -> list[Encoding]:
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
-        return self._fast.encode_batch(inputs, add_special_tokens=add_special_tokens)
+        return self._fast.encode_batch(
+            inputs,
+            add_special_tokens=add_special_tokens,
+            split_special_tokens=split_special_tokens,
+        )
 
     async def async_encode_batch(
         self,
         inputs: list[str],
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
     ) -> list[Encoding]:
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
         return await self._fast.async_encode_batch(
-            inputs, add_special_tokens=add_special_tokens
+            inputs,
+            add_special_tokens=add_special_tokens,
+            split_special_tokens=split_special_tokens,
         )
 
     # -- Post-processing ------------------------------------------------

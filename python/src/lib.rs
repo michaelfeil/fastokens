@@ -422,12 +422,13 @@ impl TokenizerState {
         &self,
         inputs: &[String],
         add_special_tokens: bool,
+        split_special_tokens: bool,
     ) -> Result<Vec<PyEncoding>, String> {
         let mut batch: Vec<Vec<u32>> = inputs
             .par_iter()
             .map(|s| {
                 self.inner
-                    .encode_with_special_tokens(s.as_str(), add_special_tokens)
+                    .encode_with_options(s.as_str(), add_special_tokens, split_special_tokens)
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -676,11 +677,12 @@ impl PyTokenizer {
     ///
     /// Truncation and padding configured via `enable_truncation` /
     /// `enable_padding` are applied before returning.
-    #[pyo3(signature = (input, add_special_tokens = false))]
+    #[pyo3(signature = (input, add_special_tokens = false, split_special_tokens = false))]
     fn encode(
         &self,
         input: &str,
         add_special_tokens: bool,
+        split_special_tokens: bool,
         py: Python<'_>,
     ) -> PyResult<Py<PyEncoding>> {
         let encoding = py
@@ -688,7 +690,7 @@ impl PyTokenizer {
                 let state = self.read();
                 let mut ids = state
                     .inner
-                    .encode_with_special_tokens(input, add_special_tokens)
+                    .encode_with_options(input, add_special_tokens, split_special_tokens)
                     .map_err(|e| e.to_string())?;
                 state.do_truncate(&mut ids);
                 let target = state.single_pad_target(ids.len());
@@ -703,17 +705,18 @@ impl PyTokenizer {
     ///
     /// Truncation is applied per-sequence; padding (if enabled) pads the
     /// batch to a uniform length.
-    #[pyo3(signature = (inputs, add_special_tokens = false))]
+    #[pyo3(signature = (inputs, add_special_tokens = false, split_special_tokens = false))]
     fn encode_batch(
         &self,
         inputs: Vec<String>,
         add_special_tokens: bool,
+        split_special_tokens: bool,
         py: Python<'_>,
     ) -> PyResult<Vec<Py<PyEncoding>>> {
         let encodings = py
             .allow_threads(|| {
                 let state = self.read();
-                state.encode_batch_encodings(&inputs, add_special_tokens)
+                state.encode_batch_encodings(&inputs, add_special_tokens, split_special_tokens)
             })
             .map_err(PyValueError::new_err)?;
         encodings
@@ -726,12 +729,13 @@ impl PyTokenizer {
     ///
     /// Truncation is applied per-sequence; padding (if enabled) pads the
     /// batch to a uniform length.
-    #[pyo3(signature = (inputs, add_special_tokens = false))]
+    #[pyo3(signature = (inputs, add_special_tokens = false, split_special_tokens = false))]
     fn async_encode_batch<'py>(
         &self,
         py: Python<'py>,
         inputs: Vec<String>,
         add_special_tokens: bool,
+        split_special_tokens: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let state = Arc::clone(&self.state);
         let rt = Arc::clone(&TOKIO_RUNTIME);
@@ -740,7 +744,7 @@ impl PyTokenizer {
             let encodings = rt
                 .spawn_blocking(move || {
                     let state = state.read().expect("PyTokenizer state lock poisoned");
-                    state.encode_batch_encodings(&inputs, add_special_tokens)
+                    state.encode_batch_encodings(&inputs, add_special_tokens, split_special_tokens)
                 })
                 .await
                 .map_err(|e| PyValueError::new_err(e.to_string()))?

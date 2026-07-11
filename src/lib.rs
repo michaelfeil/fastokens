@@ -261,6 +261,21 @@ impl Tokenizer {
         input: &str,
         add_special_tokens: bool,
     ) -> Result<Vec<u32>, Error> {
+        self.encode_with_options(input, add_special_tokens, false)
+    }
+
+    /// Run the full encoding pipeline with control over special token insertion
+    /// and whether special-token strings should be split as ordinary text.
+    ///
+    /// When `split_special_tokens` is true, special added-token strings are not
+    /// emitted directly as their special token IDs. Non-special added tokens can
+    /// still match.
+    pub fn encode_with_options(
+        &self,
+        input: &str,
+        add_special_tokens: bool,
+        split_special_tokens: bool,
+    ) -> Result<Vec<u32>, Error> {
         if input.is_empty() {
             return if add_special_tokens {
                 Ok(self.post_process(Vec::new(), true))
@@ -270,7 +285,7 @@ impl Tokenizer {
         }
 
         // 1. Split on added tokens + normalize into a single buffer.
-        let mut pts = self.build_pre_tokenized(input);
+        let mut pts = self.build_pre_tokenized_with_options(input, split_special_tokens);
 
         // Fused path: run only Split, then batch-tokenize with inline ByteLevel.
         if let Some(ref split) = self.split_only {
@@ -303,9 +318,21 @@ impl Tokenizer {
         inputs: &[S],
         add_special_tokens: bool,
     ) -> Result<Vec<Vec<u32>>, Error> {
+        self.encode_batch_with_options(inputs, add_special_tokens, false)
+    }
+
+    /// Encode a batch of inputs with full encode options.
+    pub fn encode_batch_with_options<S: AsRef<str> + Sync>(
+        &self,
+        inputs: &[S],
+        add_special_tokens: bool,
+        split_special_tokens: bool,
+    ) -> Result<Vec<Vec<u32>>, Error> {
         inputs
             .par_iter()
-            .map(|input| self.encode_with_special_tokens(input.as_ref(), add_special_tokens))
+            .map(|input| {
+                self.encode_with_options(input.as_ref(), add_special_tokens, split_special_tokens)
+            })
             .collect()
     }
 
@@ -421,7 +448,17 @@ impl Tokenizer {
     /// Build a [`PreTokenizedString`] by splitting on added tokens and
     /// normalizing text segments into a single contiguous buffer.
     pub fn build_pre_tokenized(&self, input: &str) -> PreTokenizedString {
+        self.build_pre_tokenized_with_options(input, false)
+    }
+
+    /// Build a [`PreTokenizedString`] with encode-time added-token options.
+    pub fn build_pre_tokenized_with_options(
+        &self,
+        input: &str,
+        split_special_tokens: bool,
+    ) -> PreTokenizedString {
         let segments = match &self.added_tokens {
+            Some(at) if split_special_tokens => at.split_special_as_text(input),
             Some(at) => at.split(input),
             None => vec![Segment::Text(input)],
         };
