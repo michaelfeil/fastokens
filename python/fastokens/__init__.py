@@ -1,9 +1,11 @@
 from fastokens._native import StructuralTokenConfig, Tokenizer
+from fastokens.tiktoken import tiktoken_to_tokenizer_json
 
 __all__ = [
     "StructuralTokenConfig",
     "Tokenizer",
     "patch_transformers",
+    "tiktoken_to_tokenizer_json",
     "unpatch_transformers",
 ]
 
