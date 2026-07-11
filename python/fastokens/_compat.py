@@ -20,6 +20,24 @@ from fastokens._native import Encoding, Tokenizer
 _Encoding = Encoding
 
 
+_UNSUPPORTED_SPLIT_SPECIAL_TOKENS = (
+    "split_special_tokens=True / encode_special_tokens=True is not supported by "
+    "this fastokens release"
+)
+
+
+def _reject_split_special_tokens(value: object) -> None:
+    if bool(value):
+        raise NotImplementedError(_UNSUPPORTED_SPLIT_SPECIAL_TOKENS)
+
+
+def _reject_unsupported_encode_kwargs(kwargs: dict) -> None:
+    _reject_split_special_tokens(kwargs.pop("split_special_tokens", False))
+    if kwargs:
+        names = ", ".join(sorted(kwargs))
+        raise TypeError(f"unsupported fastokens encode option(s): {names}")
+
+
 # ---------------------------------------------------------------------------
 # _TokenizerShim
 # ---------------------------------------------------------------------------
@@ -50,6 +68,7 @@ class _TokenizerShim:
                 f"got {type(src).__name__}"
             )
         self._encode_special_tokens: bool = False
+        _reject_split_special_tokens(getattr(src, "encode_special_tokens", False))
 
     # -- Pickle / copy --------------------------------------------------
 
@@ -72,7 +91,7 @@ class _TokenizerShim:
                 self._fast.enable_truncation(**trunc)
             if pad is not None:
                 self._fast.enable_padding(**{k: v for k, v in pad.items() if v is not None})
-            self._encode_special_tokens = enc_special
+            self.encode_special_tokens = enc_special
 
     def __deepcopy__(self, memo):
         new = object.__new__(_TokenizerShim)
@@ -140,7 +159,8 @@ class _TokenizerShim:
 
     @encode_special_tokens.setter
     def encode_special_tokens(self, value: bool) -> None:
-        self._encode_special_tokens = value
+        _reject_split_special_tokens(value)
+        self._encode_special_tokens = False
 
     # -- Truncation / Padding -------------------------------------------
 
@@ -211,6 +231,7 @@ class _TokenizerShim:
         add_special_tokens: bool = True,
         **kwargs,
     ) -> Encoding:
+        _reject_unsupported_encode_kwargs(kwargs)
         if pair is not None:
             raise NotImplementedError("pair encoding is not supported by fastokens")
         if is_pretokenized:
@@ -224,6 +245,7 @@ class _TokenizerShim:
         add_special_tokens: bool = True,
         **kwargs,
     ) -> list[Encoding]:
+        _reject_unsupported_encode_kwargs(kwargs)
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
