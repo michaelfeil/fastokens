@@ -1,13 +1,13 @@
+import builtins
 import json
 
 import pytest
-
-tiktoken = pytest.importorskip("tiktoken")
 
 from fastokens import Tokenizer, tiktoken_to_tokenizer_json  # noqa: E402
 
 
 def _encoding():
+    tiktoken = pytest.importorskip("tiktoken")
     return tiktoken.Encoding(
         name="fastokens-test",
         pat_str=r"(?s).+",
@@ -41,6 +41,7 @@ def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
 
 
 def test_tiktoken_to_tokenizer_json_with_encoding_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    tiktoken = pytest.importorskip("tiktoken")
     encoding = _encoding()
     monkeypatch.setattr(tiktoken, "get_encoding", lambda name: encoding)
 
@@ -69,3 +70,18 @@ def test_tiktoken_to_tokenizer_json_preserves_special_tokens() -> None:
 
     tokenizer = Tokenizer.from_json_str(tokenizer_json)
     assert tokenizer.encode(special_token, add_special_tokens=False).ids == [special_id]
+
+
+def test_tiktoken_to_tokenizer_json_returns_none_without_optional_tiktoken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def import_without_tiktoken(name, *args, **kwargs):
+        if name == "tiktoken":
+            raise ImportError("No module named 'tiktoken'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
+
+    assert tiktoken_to_tokenizer_json("cl100k_base") is None

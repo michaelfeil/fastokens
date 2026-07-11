@@ -36,11 +36,8 @@ def _extract_encoding(encoding: Any) -> Any:
     if isinstance(encoding, str):
         try:
             import tiktoken
-        except ImportError as exc:
-            raise ValueError(
-                "`tiktoken` is required when passing an encoding name. "
-                "Install it with `pip install tiktoken`."
-            ) from exc
+        except ImportError:
+            return None
         return tiktoken.get_encoding(encoding)
     return encoding
 
@@ -81,15 +78,18 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     return vocab, merges
 
 
-def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str:
+def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | None:
     """
     Convert a ``tiktoken`` encoding to a Hugging Face ``tokenizer.json`` string.
 
     ``encoding`` may be either a ``tiktoken.Encoding`` instance or an encoding
-    name accepted by ``tiktoken.get_encoding``. The returned JSON can be passed
-    directly to ``fastokens.Tokenizer.from_json_str``.
+    name accepted by ``tiktoken.get_encoding``. Passing an encoding name returns
+    ``None`` if the optional ``tiktoken`` package is not installed. The returned
+    JSON can be passed directly to ``fastokens.Tokenizer.from_json_str``.
     """
     encoding = _extract_encoding(encoding)
+    if encoding is None:
+        return None
     try:
         mergeable_ranks = encoding._mergeable_ranks
         pattern = encoding._pat_str
