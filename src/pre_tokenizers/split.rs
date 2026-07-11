@@ -319,7 +319,7 @@ impl Split {
         let text = &buffer[split.range.clone()];
         let matches = self
             .find_matches_specialized(text, base)
-            .expect("specialized split matcher");
+            .expect("specialized split should not return None for ASCII fast-path input");
 
         let mut new_splits = Vec::with_capacity(matches.len() * 2);
         let mut prev = base;
@@ -1002,7 +1002,7 @@ fn qwen3_match_end(input: &str, pos: usize) -> Option<usize> {
 }
 
 fn qwen3_contraction_len(input: &str) -> Option<usize> {
-    const CONTRACTIONS: &[&str] = &["'re", "'ve", "'ll", "'s", "'t", "'m", "'d"];
+    const CONTRACTIONS: &[&str] = &["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"];
     CONTRACTIONS
         .iter()
         .copied()
