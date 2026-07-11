@@ -101,7 +101,7 @@ def test_tiktoken_to_tokenizer_json_returns_none_without_optional_tiktoken(
 
 
 def test_tiktoken_model_to_tokenizer_json_matches_model_file(tmp_path) -> None:
-    tiktoken =     pytest.importorskip("tiktoken")
+    pytest.importorskip("tiktoken")
     encoding = _create_test_encoding()
     model_path = tmp_path / "tiktoken.model"
     _write_tiktoken_model(model_path, encoding)
