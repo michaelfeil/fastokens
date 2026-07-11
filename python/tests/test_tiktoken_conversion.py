@@ -40,6 +40,15 @@ def _create_test_encoding():
     )
 
 
+def _write_tiktoken_model(path, encoding) -> None:
+    path.write_text(
+        "\n".join(
+            f"{base64.b64encode(token).decode()} {rank}"
+            for token, rank in encoding._mergeable_ranks.items()
+        )
+    )
+
+
 def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
     encoding = _create_test_encoding()
     tokenizer = Tokenizer.from_json_str(tiktoken_to_tokenizer_json(encoding))
@@ -92,15 +101,10 @@ def test_tiktoken_to_tokenizer_json_returns_none_without_optional_tiktoken(
 
 
 def test_tiktoken_model_to_tokenizer_json_matches_model_file(tmp_path) -> None:
-    tiktoken = pytest.importorskip("tiktoken")
+    tiktoken =     pytest.importorskip("tiktoken")
     encoding = _create_test_encoding()
     model_path = tmp_path / "tiktoken.model"
-    model_path.write_text(
-        "\n".join(
-            f"{base64.b64encode(token).decode()} {rank}"
-            for token, rank in encoding._mergeable_ranks.items()
-        )
-    )
+    _write_tiktoken_model(model_path, encoding)
 
     tokenizer_json = tiktoken_model_to_tokenizer_json(
         model_path,
@@ -117,12 +121,7 @@ def test_tiktoken_model_to_tokenizer_json_matches_model_file(tmp_path) -> None:
 def test_tiktoken_model_to_tokenizer_json_reads_model_directory(tmp_path) -> None:
     tiktoken = pytest.importorskip("tiktoken")
     encoding = _create_test_encoding()
-    (tmp_path / "tiktoken.model").write_text(
-        "\n".join(
-            f"{base64.b64encode(token).decode()} {rank}"
-            for token, rank in encoding._mergeable_ranks.items()
-        )
-    )
+    _write_tiktoken_model(tmp_path / "tiktoken.model", encoding)
     (tmp_path / "tokenizer_config.json").write_text(
         json.dumps(
             {

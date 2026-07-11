@@ -4,12 +4,18 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 DEFAULT_TIKTOKEN_PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|"
     r"\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|"
     r"\s+(?!\S)|\s+"
 )
+PRINTABLE_ASCII_START = 33
+PRINTABLE_ASCII_END = 126
+LATIN1_DIRECT_START = 0xA1
+LATIN1_DIRECT_GAP_END = 0xAC
+LATIN1_DIRECT_RESUME = 0xAE
 
 
 class _MergeCandidate(NamedTuple):
@@ -27,7 +33,11 @@ def _byte_to_unicode() -> dict[int, str]:
         # Match the GPT-2 byte-level alphabet: printable ASCII plus most
         # Latin-1 bytes are kept as-is, while whitespace/control bytes map
         # to code points above the byte range.
-        should_use_direct_mapping = 33 <= byte <= 126 or 0xA1 <= byte <= 0xAC or byte >= 0xAE
+        should_use_direct_mapping = (
+            PRINTABLE_ASCII_START <= byte <= PRINTABLE_ASCII_END
+            or LATIN1_DIRECT_START <= byte <= LATIN1_DIRECT_GAP_END
+            or byte >= LATIN1_DIRECT_RESUME
+        )
         if should_use_direct_mapping:
             table[byte] = chr(byte)
         else:
@@ -60,7 +70,7 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     }
 
     merge_candidates: list[_MergeCandidate] = []
-    def split_rank_pair(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
+    def extract_rank_pair(split: tuple[int, int, bytes, bytes]) -> tuple[int, int]:
         left_rank, right_rank, _, _ = split
         return left_rank, right_rank
 
@@ -73,7 +83,7 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
             right = token[index:]
             if left in mergeable_ranks and right in mergeable_ranks:
                 local.append((mergeable_ranks[left], mergeable_ranks[right], left, right))
-        local.sort(key=split_rank_pair)
+        local.sort(key=extract_rank_pair)
         merge_candidates.extend(
             _MergeCandidate(
                 rank=rank,
@@ -120,7 +130,7 @@ def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
 
 
 def _load_model_config(model: str | Path) -> tuple[str, dict[str, Any]]:
-    if isinstance(model, str) and "://" in model:
+    if isinstance(model, str) and urlparse(model).scheme and "://" in model:
         return model, {}
     model_path = Path(model)
     if model_path.is_dir():
