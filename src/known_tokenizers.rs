@@ -13,6 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) enum KnownTokenizer {
     Qwen3,
     KimiK2_5,
@@ -27,6 +28,7 @@ impl KnownTokenizer {
     }
 }
 
+#[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) fn from_model_id(model: &str) -> Option<KnownTokenizer> {
     match model {
         "Qwen/Qwen3-0.6B"
@@ -48,6 +50,7 @@ pub(crate) fn fingerprint(json: &TokenizerJson) -> Option<KnownTokenizer> {
     None
 }
 
+#[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) fn vendored_tokenizer_json(model: &str) -> Option<&'static str> {
     from_model_id(model)?;
     None
