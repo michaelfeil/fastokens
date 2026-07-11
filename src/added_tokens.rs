@@ -59,15 +59,10 @@ impl AddedTokenMatcher {
             return Ok(None);
         }
 
-        let daac = DoubleArrayAhoCorasickBuilder::new()
-            .match_kind(daachorse::MatchKind::LeftmostLongest)
-            .build_with_values(patterns.clone())
-            .map_err(|e| format!("error building added-tokens DAAC: {e}"))?;
-
         // Collect distinct first bytes for memchr prefilter.
         let mut start_set = [false; 256];
         let mut max_token_len = 0;
-        for (content, _) in patterns {
+        for (content, _) in &patterns {
             if let Some(&b) = content.as_bytes().first() {
                 start_set[b as usize] = true;
             }
@@ -79,6 +74,11 @@ impl AddedTokenMatcher {
             .filter(|&(_, v)| *v)
             .map(|(i, _)| i as u8)
             .collect();
+
+        let daac = DoubleArrayAhoCorasickBuilder::new()
+            .match_kind(daachorse::MatchKind::LeftmostLongest)
+            .build_with_values(patterns)
+            .map_err(|e| format!("error building added-tokens DAAC: {e}"))?;
 
         Ok(Some(Self {
             daac,
