@@ -683,15 +683,20 @@ impl PyTokenizer {
         add_special_tokens: bool,
         py: Python<'_>,
     ) -> PyResult<Py<PyEncoding>> {
-        let state = self.read();
-        let mut ids = state
-            .inner
-            .encode_with_special_tokens(input, add_special_tokens)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        state.do_truncate(&mut ids);
-        let target = state.single_pad_target(ids.len());
+        let encoding = py
+            .allow_threads(|| {
+                let state = self.read();
+                let mut ids = state
+                    .inner
+                    .encode_with_special_tokens(input, add_special_tokens)
+                    .map_err(|e| e.to_string())?;
+                state.do_truncate(&mut ids);
+                let target = state.single_pad_target(ids.len());
+                Ok::<PyEncoding, String>(build_encoding(ids, state.pad.as_ref(), target))
+            })
+            .map_err(PyValueError::new_err)?;
 
-        Py::new(py, build_encoding(ids, state.pad.as_ref(), target))
+        Py::new(py, encoding)
     }
 
     /// Encode a batch of inputs in parallel.
@@ -705,9 +710,11 @@ impl PyTokenizer {
         add_special_tokens: bool,
         py: Python<'_>,
     ) -> PyResult<Vec<Py<PyEncoding>>> {
-        let state = self.read();
-        let encodings = state
-            .encode_batch_encodings(&inputs, add_special_tokens)
+        let encodings = py
+            .allow_threads(|| {
+                let state = self.read();
+                state.encode_batch_encodings(&inputs, add_special_tokens)
+            })
             .map_err(PyValueError::new_err)?;
         encodings
             .into_iter()

@@ -75,7 +75,7 @@ jobs:
         if: ${{ matrix.platform.ft }}
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -i python3.13t
+          args: --release --out dist -i python3.14t
           sccache: "false"
           manylinux: auto
           before-script-linux: |
@@ -122,7 +122,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -i python3.13t
+          args: --release --out dist -i python3.14t
           sccache: "false"
           manylinux: musllinux_1_2
       - name: Upload wheels
@@ -175,7 +175,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -i python3.13t
+          args: --release --out dist -i python3.14t
           sccache: "false"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
