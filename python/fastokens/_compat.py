@@ -20,22 +20,22 @@ from fastokens._native import Encoding, Tokenizer
 _Encoding = Encoding
 
 
-_UNSUPPORTED_SPLIT_SPECIAL_TOKENS = (
-    "split_special_tokens=True / encode_special_tokens=True is not supported by "
-    "this fastokens release"
-)
-
-
-def _reject_split_special_tokens(value: object) -> None:
-    if bool(value):
-        raise NotImplementedError(_UNSUPPORTED_SPLIT_SPECIAL_TOKENS)
-
-
-def _reject_unsupported_encode_kwargs(kwargs: dict) -> None:
-    _reject_split_special_tokens(kwargs.pop("split_special_tokens", False))
+def _reject_unsupported_kwargs(kwargs: dict) -> None:
     if kwargs:
         names = ", ".join(sorted(kwargs))
         raise TypeError(f"unsupported fastokens encode option(s): {names}")
+
+
+def _validate_bool_option(name: str, value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise TypeError(f"{name} must be a bool")
+
+
+def _validate_optional_bool_option(name: str, value: object) -> bool | None:
+    if value is None:
+        return None
+    return _validate_bool_option(name, value)
 
 
 # ---------------------------------------------------------------------------
@@ -62,13 +62,17 @@ class _TokenizerShim:
             # Accept a real tokenizers.Tokenizer (e.g. from convert_slow_tokenizer).
             self._json = src.to_str()
             self._fast = Tokenizer.from_json_str(self._json)
+            self._encode_special_tokens = _validate_bool_option(
+                "encode_special_tokens",
+                getattr(src, "encode_special_tokens", False),
+            )
         else:
             raise TypeError(
                 f"expected JSON string, _TokenizerShim, or tokenizers.Tokenizer; "
                 f"got {type(src).__name__}"
             )
-        self._encode_special_tokens: bool = False
-        _reject_split_special_tokens(getattr(src, "encode_special_tokens", False))
+        if not hasattr(self, "_encode_special_tokens"):
+            self._encode_special_tokens = False
 
     # -- Pickle / copy --------------------------------------------------
 
@@ -159,8 +163,9 @@ class _TokenizerShim:
 
     @encode_special_tokens.setter
     def encode_special_tokens(self, value: bool) -> None:
-        _reject_split_special_tokens(value)
-        self._encode_special_tokens = False
+        self._encode_special_tokens = _validate_bool_option(
+            "encode_special_tokens", value
+        )
 
     # -- Truncation / Padding -------------------------------------------
 
@@ -229,14 +234,19 @@ class _TokenizerShim:
         pair: str | None = None,
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
-        split_special_tokens: bool = False,
+        split_special_tokens: bool | None = None,
         **kwargs,
     ) -> Encoding:
-        _reject_unsupported_encode_kwargs(kwargs)
+        _reject_unsupported_kwargs(kwargs)
+        split_special_tokens = _validate_optional_bool_option(
+            "split_special_tokens", split_special_tokens
+        )
         if pair is not None:
             raise NotImplementedError("pair encoding is not supported by fastokens")
         if is_pretokenized:
             raise NotImplementedError("pre-tokenized input is not supported by fastokens")
+        if split_special_tokens is None:
+            split_special_tokens = self._encode_special_tokens
         return self._fast.encode(
             sequence,
             add_special_tokens=add_special_tokens,
@@ -248,14 +258,19 @@ class _TokenizerShim:
         inputs: list,
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
-        split_special_tokens: bool = False,
+        split_special_tokens: bool | None = None,
         **kwargs,
     ) -> list[Encoding]:
-        _reject_unsupported_encode_kwargs(kwargs)
+        _reject_unsupported_kwargs(kwargs)
+        split_special_tokens = _validate_optional_bool_option(
+            "split_special_tokens", split_special_tokens
+        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
+        if split_special_tokens is None:
+            split_special_tokens = self._encode_special_tokens
         return self._fast.encode_batch(
             inputs,
             add_special_tokens=add_special_tokens,
@@ -267,12 +282,17 @@ class _TokenizerShim:
         inputs: list[str],
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
-        split_special_tokens: bool = False,
+        split_special_tokens: bool | None = None,
     ) -> list[Encoding]:
+        split_special_tokens = _validate_optional_bool_option(
+            "split_special_tokens", split_special_tokens
+        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
+        if split_special_tokens is None:
+            split_special_tokens = self._encode_special_tokens
         return self._fast.encode_batch(
             inputs,
             add_special_tokens=add_special_tokens,
@@ -284,12 +304,17 @@ class _TokenizerShim:
         inputs: list[str],
         is_pretokenized: bool = False,
         add_special_tokens: bool = True,
-        split_special_tokens: bool = False,
+        split_special_tokens: bool | None = None,
     ) -> list[Encoding]:
+        split_special_tokens = _validate_optional_bool_option(
+            "split_special_tokens", split_special_tokens
+        )
         if is_pretokenized or any(isinstance(inp, (list, tuple)) for inp in inputs):
             raise NotImplementedError(
                 "pair/pre-tokenized batch encoding is not supported by fastokens"
             )
+        if split_special_tokens is None:
+            split_special_tokens = self._encode_special_tokens
         return await self._fast.async_encode_batch(
             inputs,
             add_special_tokens=add_special_tokens,

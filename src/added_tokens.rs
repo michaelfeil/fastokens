@@ -216,7 +216,12 @@ impl AddedTokens {
             .filter(|c| !c.special)
             .map(|c| (c.content.as_str(), c.id))
             .collect();
-        let all = AddedTokenMatcher::new(patterns)?.expect("non-empty added token patterns");
+        let Some(all) = AddedTokenMatcher::new(patterns)? else {
+            debug_assert!(false, "non-empty configs should produce token patterns");
+            return Ok(None);
+        };
+        // Keep a second matcher for split_special_tokens=true. This costs
+        // extra DAAC memory, but keeps the encode hot path branch-free.
         let non_special = AddedTokenMatcher::new(non_special_patterns)?;
 
         Ok(Some(Self {

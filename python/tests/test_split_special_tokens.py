@@ -1,5 +1,6 @@
 import json
 import unittest
+from copy import deepcopy
 
 from fastokens._compat import _TokenizerShim
 from fastokens._native import Tokenizer
@@ -91,6 +92,16 @@ class SplitSpecialTokensTests(unittest.TestCase):
             "<think>",
             "<|tool_calls_section_begin|>",
         ),
+        (
+            "ascii-endoftext",
+            "<|endoftext|>",
+            "<tool>",
+        ),
+        (
+            "ascii-short",
+            "<s>",
+            "<tool_call>",
+        ),
     ]
 
     def test_native_split_special_tokens_matches_kimi_style_expectations(self) -> None:
@@ -125,6 +136,26 @@ class SplitSpecialTokensTests(unittest.TestCase):
                 self.assertEqual(non_special_ids, [NON_SPECIAL_ID])
                 self.assertEqual(with_bos_ids, [BOS_ID, *expected_text_ids])
 
+    def test_native_split_special_tokens_handles_specials_inside_text(self) -> None:
+        for model_name, special_token, _non_special_token in self.CASES:
+            with self.subTest(model_name=model_name):
+                tokenizer_json = _tokenizer_json(special_token, "<tool>")
+                tokenizer = Tokenizer.from_json_str(tokenizer_json)
+                text = f"hello{special_token} hello"
+
+                default_ids = tokenizer.encode(
+                    text,
+                    add_special_tokens=False,
+                ).ids
+                split_ids = tokenizer.encode(
+                    text,
+                    add_special_tokens=False,
+                    split_special_tokens=True,
+                ).ids
+
+                self.assertIn(SPECIAL_ID, default_ids)
+                self.assertEqual(split_ids, _char_ids(tokenizer_json, text))
+
     def test_shim_forwards_split_special_tokens_keyword(self) -> None:
         for model_name, special_token, _non_special_token in self.CASES:
             with self.subTest(model_name=model_name):
@@ -146,6 +177,73 @@ class SplitSpecialTokensTests(unittest.TestCase):
                     ).ids,
                     _char_ids(tokenizer_json, special_token),
                 )
+
+    def test_shim_respects_encode_special_tokens_property(self) -> None:
+        for model_name, special_token, _non_special_token in self.CASES:
+            with self.subTest(model_name=model_name):
+                tokenizer_json = _tokenizer_json(special_token, "<tool>")
+                tokenizer = _TokenizerShim.from_str(tokenizer_json)
+                tokenizer.encode_special_tokens = True
+
+                self.assertEqual(
+                    tokenizer.encode(special_token, add_special_tokens=False).ids,
+                    _char_ids(tokenizer_json, special_token),
+                )
+                self.assertEqual(
+                    tokenizer.encode_batch(
+                        [special_token],
+                        add_special_tokens=False,
+                    )[0].ids,
+                    _char_ids(tokenizer_json, special_token),
+                )
+
+    def test_shim_explicit_split_special_tokens_overrides_property(self) -> None:
+        for model_name, special_token, _non_special_token in self.CASES:
+            with self.subTest(model_name=model_name):
+                tokenizer_json = _tokenizer_json(special_token, "<tool>")
+                tokenizer = _TokenizerShim.from_str(tokenizer_json)
+                tokenizer.encode_special_tokens = True
+
+                self.assertEqual(
+                    tokenizer.encode(
+                        special_token,
+                        add_special_tokens=False,
+                        split_special_tokens=False,
+                    ).ids,
+                    [SPECIAL_ID],
+                )
+
+    def test_shim_copy_preserves_encode_special_tokens_property(self) -> None:
+        for model_name, special_token, _non_special_token in self.CASES:
+            with self.subTest(model_name=model_name):
+                tokenizer_json = _tokenizer_json(special_token, "<tool>")
+                tokenizer = _TokenizerShim.from_str(tokenizer_json)
+                tokenizer.encode_special_tokens = True
+
+                copied = deepcopy(tokenizer)
+
+                self.assertTrue(copied.encode_special_tokens)
+                self.assertEqual(
+                    copied.encode(special_token, add_special_tokens=False).ids,
+                    _char_ids(tokenizer_json, special_token),
+                )
+
+    def test_shim_rejects_unknown_encode_kwargs(self) -> None:
+        tokenizer = _TokenizerShim.from_str(_tokenizer_json("<think>", "<tool>"))
+
+        with self.assertRaisesRegex(TypeError, "return_offsets_mapping"):
+            tokenizer.encode(
+                "hello",
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+
+        with self.assertRaisesRegex(TypeError, "return_attention_mask"):
+            tokenizer.encode_batch(
+                ["hello"],
+                add_special_tokens=False,
+                return_attention_mask=True,
+            )
 
 
 if __name__ == "__main__":
