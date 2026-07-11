@@ -106,10 +106,10 @@ def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
                 continue
             if isinstance(token_config, dict):
                 content = token_config.get("content")
-                is_special = token_config.get("special", True)
+                is_special = token_config.get("special", False)
             else:
                 content = token_config
-                is_special = True
+                is_special = False
             if isinstance(content, str) and is_special:
                 special_tokens[content] = token_id_int
     return special_tokens

@@ -154,3 +154,19 @@ def test_tiktoken_model_to_tokenizer_json_returns_none_without_optional_tiktoken
     monkeypatch.setattr(builtins, "__import__", import_without_tiktoken)
 
     assert tiktoken_model_to_tokenizer_json("tiktoken.model") is None
+
+
+def test_tiktoken_model_to_tokenizer_json_raises_for_missing_file(tmp_path) -> None:
+    pytest.importorskip("tiktoken")
+
+    with pytest.raises(FileNotFoundError):
+        tiktoken_model_to_tokenizer_json(tmp_path / "missing.model")
+
+
+def test_tiktoken_model_to_tokenizer_json_raises_for_invalid_file(tmp_path) -> None:
+    pytest.importorskip("tiktoken")
+    model_path = tmp_path / "tiktoken.model"
+    model_path.write_text("not-a-valid-model-line")
+
+    with pytest.raises(ValueError, match="Error parsing line"):
+        tiktoken_model_to_tokenizer_json(model_path)
