@@ -471,7 +471,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastokens"
+name = "fastokens-b10"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -496,7 +496,7 @@ dependencies = [
 name = "fastokens-python"
 version = "0.2.0"
 dependencies = [
- "fastokens",
+ "fastokens-b10",
  "pyo3",
  "pyo3-async-runtimes",
  "rayon",

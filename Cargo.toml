@@ -10,7 +10,7 @@ homepage = "https://github.com/Atero-ai/fastokens"
 documentation = "https://github.com/Atero-ai/fastokens/blob/main/README.md"
 
 [package]
-name = "fastokens"
+name = "fastokens-b10"
 version.workspace = true
 edition.workspace = true
 description = "Fast Tokenizer"
@@ -18,6 +18,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+
+[lib]
+name = "fastokens"
 
 [features]
 default = ["hf-hub"]
