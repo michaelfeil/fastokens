@@ -123,14 +123,25 @@ class Tokenizer:
 
     def num_special_tokens_to_add(self, is_pair: bool) -> int: ...
 
-    def encode(self, input: str, add_special_tokens: bool = False) -> Encoding: ...
+    def encode(
+        self,
+        input: str,
+        add_special_tokens: bool = False,
+        split_special_tokens: bool = False,
+    ) -> Encoding: ...
 
     def encode_batch(
-        self, inputs: list[str], add_special_tokens: bool = False
+        self,
+        inputs: list[str],
+        add_special_tokens: bool = False,
+        split_special_tokens: bool = False,
     ) -> list[Encoding]: ...
 
     async def async_encode_batch(
-        self, inputs: list[str], add_special_tokens: bool = False
+        self,
+        inputs: list[str],
+        add_special_tokens: bool = False,
+        split_special_tokens: bool = False,
     ) -> list[Encoding]: ...
 
     def decode_tokens(self, tokens: list[str]) -> str: ...

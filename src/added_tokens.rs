@@ -12,15 +12,9 @@ use crate::json_structs::AddedTokenConfig;
 /// Matched spans are assigned their token IDs directly; unmatched spans pass
 /// through normalization, pre-tokenization and the model as usual.
 pub struct AddedTokens {
-    daac: DoubleArrayAhoCorasick<u32>,
-    /// Token lengths (in bytes) indexed by token ID, for matched tokens only.
-    /// Non-added token IDs map to 0.
-    token_lens: Vec<usize>,
-    /// Distinct first bytes of all added token strings. Used to quickly skip
-    /// positions that cannot start any token via SIMD memchr.
-    start_bytes: Vec<u8>,
-    /// Longest added token in bytes. Limits the DAAC scan window.
-    max_token_len: usize,
+    all: AddedTokenMatcher,
+    has_special_tokens: bool,
+    has_non_special_tokens: bool,
     /// Mapping from token ID to token content string.
     id_to_content: HashMap<u32, String>,
     /// Reverse mapping: token content string → token ID.
@@ -48,49 +42,29 @@ pub struct AddedTokenInfo<'a> {
     pub special: bool,
 }
 
-impl AddedTokens {
-    /// Build from the `added_tokens` array in `tokenizer.json`.
-    ///
-    /// Returns `None` if there are no added tokens.
-    pub fn from_configs(configs: &[AddedTokenConfig]) -> Result<Option<Self>, String> {
-        if configs.is_empty() {
+struct AddedTokenMatcher {
+    daac: DoubleArrayAhoCorasick<u32>,
+    /// Distinct first bytes of all added token strings. Used to quickly skip
+    /// positions that cannot start any token via SIMD memchr.
+    start_bytes: Vec<u8>,
+    /// Longest added token in bytes. Limits the DAAC scan window.
+    max_token_len: usize,
+}
+
+impl AddedTokenMatcher {
+    fn new(patterns: Vec<(&str, u32)>) -> Result<Option<Self>, String> {
+        if patterns.is_empty() {
             return Ok(None);
         }
-
-        let max_id = configs.iter().map(|c| c.id).max().unwrap_or(0);
-        let mut token_lens = vec![0usize; (max_id + 1) as usize];
-
-        let mut id_to_content = HashMap::with_capacity(configs.len());
-        let mut special_ids = HashSet::new();
-
-        let mut content_to_id = HashMap::with_capacity(configs.len());
-
-        let patterns: Vec<(&str, u32)> = configs
-            .iter()
-            .map(|c| {
-                token_lens[c.id as usize] = c.content.len();
-                id_to_content.insert(c.id, c.content.clone());
-                content_to_id.insert(c.content.clone(), c.id);
-                if c.special {
-                    special_ids.insert(c.id);
-                }
-                (c.content.as_str(), c.id)
-            })
-            .collect();
-
-        let daac = DoubleArrayAhoCorasickBuilder::new()
-            .match_kind(daachorse::MatchKind::LeftmostLongest)
-            .build_with_values(patterns)
-            .map_err(|e| format!("error building added-tokens DAAC: {e}"))?;
 
         // Collect distinct first bytes for memchr prefilter.
         let mut start_set = [false; 256];
         let mut max_token_len = 0;
-        for c in configs {
-            if let Some(&b) = c.content.as_bytes().first() {
+        for (content, _) in &patterns {
+            if let Some(&b) = content.as_bytes().first() {
                 start_set[b as usize] = true;
             }
-            max_token_len = max_token_len.max(c.content.len());
+            max_token_len = max_token_len.max(content.len());
         }
         let start_bytes: Vec<u8> = start_set
             .iter()
@@ -99,54 +73,16 @@ impl AddedTokens {
             .map(|(i, _)| i as u8)
             .collect();
 
+        let daac = DoubleArrayAhoCorasickBuilder::new()
+            .match_kind(daachorse::MatchKind::LeftmostLongest)
+            .build_with_values(patterns)
+            .map_err(|e| format!("error building added-tokens DAAC: {e}"))?;
+
         Ok(Some(Self {
             daac,
-            token_lens,
             start_bytes,
             max_token_len,
-            id_to_content,
-            content_to_id,
-            special_ids,
         }))
-    }
-
-    /// Look up the string content of an added token by ID.
-    pub fn id_to_token(&self, id: u32) -> Option<&str> {
-        self.id_to_content.get(&id).map(String::as_str)
-    }
-
-    /// Look up the token ID for a content string.
-    pub fn token_to_id(&self, token: &str) -> Option<u32> {
-        self.content_to_id.get(token).copied()
-    }
-
-    /// Check if a token ID is a special added token.
-    pub fn is_special(&self, id: u32) -> bool {
-        self.special_ids.contains(&id)
-    }
-
-    /// Return the number of added tokens.
-    pub fn len(&self) -> usize {
-        self.id_to_content.len()
-    }
-
-    /// Return whether there are no added tokens.
-    pub fn is_empty(&self) -> bool {
-        self.id_to_content.is_empty()
-    }
-
-    /// Iterate over added-token entries.
-    ///
-    /// The iteration order is unspecified. Callers that need a stable order
-    /// should sort by `id` themselves.
-    pub fn iter(&self) -> impl Iterator<Item = AddedTokenInfo<'_>> {
-        self.id_to_content
-            .iter()
-            .map(|(&id, content)| AddedTokenInfo {
-                id,
-                content: content.as_str(),
-                special: self.special_ids.contains(&id),
-            })
     }
 
     /// Split `input` into segments: spans matching added tokens and spans of
@@ -155,7 +91,7 @@ impl AddedTokens {
     /// Added tokens are matched leftmost-longest. Non-overlapping matches are
     /// emitted as [`Segment::Token`]; the gaps between them as
     /// [`Segment::Text`].
-    pub fn split<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
+    fn split<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
         // When there are few distinct start bytes, use SIMD memchr to skip
         // positions that cannot start any added token. This avoids scanning
         // the full input through the Aho-Corasick automaton.
@@ -243,11 +179,167 @@ impl AddedTokens {
     }
 }
 
+impl AddedTokens {
+    /// Build from the `added_tokens` array in `tokenizer.json`.
+    ///
+    /// Returns `None` if there are no added tokens.
+    pub fn from_configs(configs: &[AddedTokenConfig]) -> Result<Option<Self>, String> {
+        if configs.is_empty() {
+            return Ok(None);
+        }
+
+        let mut id_to_content = HashMap::with_capacity(configs.len());
+        let mut special_ids = HashSet::new();
+
+        let mut content_to_id = HashMap::with_capacity(configs.len());
+
+        let patterns: Vec<(&str, u32)> = configs
+            .iter()
+            .map(|c| {
+                id_to_content.insert(c.id, c.content.clone());
+                content_to_id.insert(c.content.clone(), c.id);
+                if c.special {
+                    special_ids.insert(c.id);
+                }
+                (c.content.as_str(), c.id)
+            })
+            .collect();
+
+        let Some(all) = AddedTokenMatcher::new(patterns)? else {
+            debug_assert!(false, "non-empty configs should produce token patterns");
+            return Ok(None);
+        };
+        let has_special_tokens = !special_ids.is_empty();
+        let has_non_special_tokens = special_ids.len() != configs.len();
+
+        Ok(Some(Self {
+            all,
+            has_special_tokens,
+            has_non_special_tokens,
+            id_to_content,
+            content_to_id,
+            special_ids,
+        }))
+    }
+
+    /// Look up the string content of an added token by ID.
+    pub fn id_to_token(&self, id: u32) -> Option<&str> {
+        self.id_to_content.get(&id).map(String::as_str)
+    }
+
+    /// Look up the token ID for a content string.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.content_to_id.get(token).copied()
+    }
+
+    /// Check if a token ID is a special added token.
+    pub fn is_special(&self, id: u32) -> bool {
+        self.special_ids.contains(&id)
+    }
+
+    /// Return the number of added tokens.
+    pub fn len(&self) -> usize {
+        self.id_to_content.len()
+    }
+
+    /// Return whether there are no added tokens.
+    pub fn is_empty(&self) -> bool {
+        self.id_to_content.is_empty()
+    }
+
+    /// Iterate over added-token entries.
+    ///
+    /// The iteration order is unspecified. Callers that need a stable order
+    /// should sort by `id` themselves.
+    pub fn iter(&self) -> impl Iterator<Item = AddedTokenInfo<'_>> {
+        self.id_to_content
+            .iter()
+            .map(|(&id, content)| AddedTokenInfo {
+                id,
+                content: content.as_str(),
+                special: self.special_ids.contains(&id),
+            })
+    }
+
+    /// Split `input` into segments: spans matching added tokens and spans of
+    /// regular text.
+    ///
+    /// Added tokens are matched leftmost-longest. Non-overlapping matches are
+    /// emitted as [`Segment::Token`]; the gaps between them as
+    /// [`Segment::Text`].
+    pub fn split<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
+        self.all.split(input)
+    }
+
+    /// Split `input` into segments while leaving special added tokens as text.
+    ///
+    /// This mirrors HuggingFace's `split_special_tokens=True` encode option:
+    /// special-token strings are tokenized through the normal model pipeline,
+    /// while non-special added tokens can still match as added tokens.
+    pub fn split_special_as_text<'a>(&self, input: &'a str) -> Vec<Segment<'a>> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+
+        if !self.has_special_tokens {
+            return self.all.split(input);
+        }
+        if !self.has_non_special_tokens {
+            return vec![Segment::Text(input)];
+        }
+
+        let mut segments = Vec::new();
+        let mut cursor = 0;
+        let mut pending_text_start: Option<usize> = None;
+
+        for segment in self.all.split(input) {
+            match segment {
+                Segment::Text(text) => {
+                    if !text.is_empty() && pending_text_start.is_none() {
+                        pending_text_start = Some(cursor);
+                    }
+                    cursor += text.len();
+                }
+                Segment::Token(id) => {
+                    let content = self
+                        .id_to_content
+                        .get(&id)
+                        .expect("matcher id must exist in added-token content map");
+                    let start = cursor;
+                    let end = start + content.len();
+
+                    if self.special_ids.contains(&id) {
+                        if pending_text_start.is_none() {
+                            pending_text_start = Some(start);
+                        }
+                    } else {
+                        if let Some(text_start) = pending_text_start.take()
+                            && text_start < start
+                        {
+                            segments.push(Segment::Text(&input[text_start..start]));
+                        }
+                        segments.push(Segment::Token(id));
+                    }
+
+                    cursor = end;
+                }
+            }
+        }
+
+        if let Some(text_start) = pending_text_start
+            && text_start < cursor
+        {
+            segments.push(Segment::Text(&input[text_start..cursor]));
+        }
+
+        segments
+    }
+}
+
 impl fmt::Debug for AddedTokens {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let count = self.token_lens.iter().filter(|&&len| len > 0).count();
         f.debug_struct("AddedTokens")
-            .field("count", &count)
+            .field("count", &self.len())
             .finish()
     }
 }
@@ -450,6 +542,68 @@ mod tests {
         assert!(at.is_special(1));
         assert!(!at.is_special(2));
         assert!(!at.is_special(99)); // unknown id
+    }
+
+    #[test]
+    fn split_special_as_text_keeps_non_special_matches() {
+        let mut special = make_config(1, "<think>");
+        special.special = true;
+        let non_special = make_config(2, "<|tool_calls_section_begin|>");
+        let at = AddedTokens::from_configs(&[special, non_special])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("a<think>b<|tool_calls_section_begin|>c"),
+            vec![
+                Segment::Text("a<think>b"),
+                Segment::Token(2),
+                Segment::Text("c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_special_as_text_without_non_special_tokens_returns_text() {
+        let mut special = make_config(1, "<think>");
+        special.special = true;
+        let mut end_special = make_config(2, "</think>");
+        end_special.special = true;
+        let at = AddedTokens::from_configs(&[special, end_special])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("a<think>b</think>c"),
+            vec![Segment::Text("a<think>b</think>c")]
+        );
+        assert!(at.split_special_as_text("").is_empty());
+    }
+
+    #[test]
+    fn split_special_as_text_with_no_special_tokens_uses_all_matches() {
+        let plain = make_config(1, "<extra>");
+        let at = AddedTokens::from_configs(&[plain]).unwrap().unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("a<extra>b"),
+            vec![Segment::Text("a"), Segment::Token(1), Segment::Text("b")]
+        );
+    }
+
+    #[test]
+    fn split_special_as_text_blocks_non_special_match_inside_special_text() {
+        let mut special = make_config(1, "<mask>");
+        special.special = true;
+        let non_special = make_config(2, "ask>");
+        let at = AddedTokens::from_configs(&[special, non_special])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            at.split_special_as_text("<mask>"),
+            vec![Segment::Text("<mask>")]
+        );
     }
 
     #[test]

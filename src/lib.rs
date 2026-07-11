@@ -261,6 +261,21 @@ impl Tokenizer {
         input: &str,
         add_special_tokens: bool,
     ) -> Result<Vec<u32>, Error> {
+        self.encode_with_options(input, add_special_tokens, false)
+    }
+
+    /// Run the full encoding pipeline with control over special token insertion
+    /// and whether special-token strings should be split as ordinary text.
+    ///
+    /// When `split_special_tokens` is true, special added-token strings are not
+    /// emitted directly as their special token IDs. Non-special added tokens can
+    /// still match.
+    pub fn encode_with_options(
+        &self,
+        input: &str,
+        add_special_tokens: bool,
+        split_special_tokens: bool,
+    ) -> Result<Vec<u32>, Error> {
         if input.is_empty() {
             return if add_special_tokens {
                 Ok(self.post_process(Vec::new(), true))
@@ -270,7 +285,7 @@ impl Tokenizer {
         }
 
         // 1. Split on added tokens + normalize into a single buffer.
-        let mut pts = self.build_pre_tokenized(input);
+        let mut pts = self.build_pre_tokenized_with_options(input, split_special_tokens);
 
         // Fused path: run only Split, then batch-tokenize with inline ByteLevel.
         if let Some(ref split) = self.split_only {
@@ -303,9 +318,21 @@ impl Tokenizer {
         inputs: &[S],
         add_special_tokens: bool,
     ) -> Result<Vec<Vec<u32>>, Error> {
+        self.encode_batch_with_options(inputs, add_special_tokens, false)
+    }
+
+    /// Encode a batch of inputs with full encode options.
+    pub fn encode_batch_with_options<S: AsRef<str> + Sync>(
+        &self,
+        inputs: &[S],
+        add_special_tokens: bool,
+        split_special_tokens: bool,
+    ) -> Result<Vec<Vec<u32>>, Error> {
         inputs
             .par_iter()
-            .map(|input| self.encode_with_special_tokens(input.as_ref(), add_special_tokens))
+            .map(|input| {
+                self.encode_with_options(input.as_ref(), add_special_tokens, split_special_tokens)
+            })
             .collect()
     }
 
@@ -421,7 +448,17 @@ impl Tokenizer {
     /// Build a [`PreTokenizedString`] by splitting on added tokens and
     /// normalizing text segments into a single contiguous buffer.
     pub fn build_pre_tokenized(&self, input: &str) -> PreTokenizedString {
+        self.build_pre_tokenized_with_options(input, false)
+    }
+
+    /// Build a [`PreTokenizedString`] with encode-time added-token options.
+    pub fn build_pre_tokenized_with_options(
+        &self,
+        input: &str,
+        split_special_tokens: bool,
+    ) -> PreTokenizedString {
         let segments = match &self.added_tokens {
+            Some(at) if split_special_tokens => at.split_special_as_text(input),
             Some(at) => at.split(input),
             None => vec![Segment::Text(input)],
         };
@@ -596,6 +633,8 @@ pub fn decode_stream_step(
 #[cfg(all(test, feature = "hf-hub"))]
 mod tests {
     use crate::hf_hub_support::make_api;
+
+    use std::str::FromStr;
 
     use super::*;
 
@@ -832,26 +871,46 @@ mod tests {
         "| col1 | col2 |\n|------|------|\n| a    | b    |",
     ];
 
-    /// Helper: compare both encoding and decoding of every input in `corpus`
-    /// between our tokenizer and the HuggingFace tokenizer for a given model.
+    /// Helper: compare encoding of every input in `corpus` in both default
+    /// and split-special-token modes, and compare decoding of the default IDs.
+    /// Special-token samples from each model are included so split mode covers
+    /// model-specific added-token strings, not just generic text.
     /// Returns a list of failure descriptions (empty = all passed).
     fn compare_encode_decode(model_name: &str, corpus: &[&str]) -> Vec<String> {
-        let hf = tokenizers::Tokenizer::from_pretrained(model_name, None)
+        let mut hf = tokenizers::Tokenizer::from_pretrained(model_name, None)
             .unwrap_or_else(|e| panic!("{model_name}: HF load failed: {e}"));
         let ours = Tokenizer::from_model(model_name)
             .unwrap_or_else(|e| panic!("{model_name}: fastokens load failed: {e}"));
 
+        let special_samples: Vec<String> = ours
+            .added_tokens()
+            .map(|added| {
+                added
+                    .iter()
+                    .filter(|entry| entry.special)
+                    .take(4)
+                    .flat_map(|entry| {
+                        [
+                            entry.content.to_string(),
+                            format!("hello {} world", entry.content),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut failures = Vec::new();
-        for &input in corpus {
+        let mut compare_input = |input: &str, compare_decode: bool| {
+            hf.set_encode_special_tokens(false);
             let hf_enc = hf
                 .encode(input, false)
                 .unwrap_or_else(|e| panic!("{model_name}: HF encode({input:?}): {e}"));
             let hf_ids = hf_enc.get_ids().to_vec();
-            let our_ids = match ours.encode(input) {
+            let our_ids = match ours.encode_with_options(input, false, false) {
                 Ok(ids) => ids,
                 Err(e) => {
                     failures.push(format!("  encode error on {input:?}: {e}"));
-                    continue;
+                    return;
                 }
             };
             if our_ids != hf_ids {
@@ -866,19 +925,45 @@ mod tests {
                 ));
             }
 
-            // Decode comparison (skip empty inputs / empty token sequences).
-            if input.is_empty() || hf_ids.is_empty() {
-                continue;
+            hf.set_encode_special_tokens(true);
+            let hf_split_ids = hf
+                .encode(input, false)
+                .unwrap_or_else(|e| panic!("{model_name}: HF split encode({input:?}): {e}"))
+                .get_ids()
+                .to_vec();
+            let our_split_ids = match ours.encode_with_options(input, false, true) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    failures.push(format!("  split encode error on {input:?}: {e}"));
+                    return;
+                }
+            };
+            if our_split_ids != hf_split_ids {
+                failures.push(format!(
+                    "  split encode mismatch on {input:?}: got {} tokens, expected {}\n\
+                     \x20   ours: {:?}\n\
+                     \x20   hf:   {:?}",
+                    our_split_ids.len(),
+                    hf_split_ids.len(),
+                    &our_split_ids[..our_split_ids.len().min(20)],
+                    &hf_split_ids[..hf_split_ids.len().min(20)],
+                ));
             }
+
+            // Decode comparison (skip empty inputs / empty token sequences).
+            if !compare_decode || input.is_empty() || hf_ids.is_empty() {
+                return;
+            }
+            hf.set_encode_special_tokens(false);
             let hf_decoded = match hf.decode(&hf_ids, false) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(_) => return,
             };
             let our_decoded = match ours.decode(&hf_ids, false) {
                 Ok(d) => d,
                 Err(e) => {
                     failures.push(format!("  decode error on {input:?}: {e}"));
-                    continue;
+                    return;
                 }
             };
             if our_decoded != hf_decoded {
@@ -890,6 +975,13 @@ mod tests {
                     &hf_decoded[..hf_decoded.len().min(100)],
                 ));
             }
+        };
+
+        for &input in corpus {
+            compare_input(input, true);
+        }
+        for input in &special_samples {
+            compare_input(input, false);
         }
         failures
     }
@@ -990,6 +1082,129 @@ mod tests {
     fn correctness_kimi_k2_5() {
         let f = compare_encode_decode("hoangquan456/Kimi-K2.5", CORPUS);
         assert!(f.is_empty(), "hoangquan456/Kimi-K2.5:\n{}", f.join("\n"));
+    }
+
+    #[test]
+    fn split_special_tokens_kimi_k2_5_matches_hf_tokenizers() {
+        let model = "hoangquan456/Kimi-K2.5";
+        let mut hf = tokenizers::Tokenizer::from_pretrained(model, None)
+            .unwrap_or_else(|e| panic!("{model}: HF load failed: {e}"));
+        let ours =
+            Tokenizer::from_model(model).unwrap_or_else(|e| panic!("{model}: load failed: {e}"));
+
+        let inputs = &[
+            "<think>",
+            "hello <think> world",
+            "🤔<think>final answer",
+            "<|tool_calls_section_begin|>{\"name\":\"search\"}",
+        ];
+
+        hf.set_encode_special_tokens(true);
+        for input in inputs {
+            let hf_ids = hf
+                .encode(*input, false)
+                .unwrap_or_else(|e| panic!("{model}: HF encode({input:?}): {e}"))
+                .get_ids()
+                .to_vec();
+            let our_ids = ours
+                .encode_with_options(input, false, true)
+                .unwrap_or_else(|e| panic!("{model}: fastokens encode({input:?}): {e}"));
+            assert_eq!(
+                our_ids, hf_ids,
+                "split_special_tokens=true mismatch on {input:?}"
+            );
+        }
+
+        hf.set_encode_special_tokens(false);
+        let input = "<think>";
+        let hf_ids = hf
+            .encode(input, false)
+            .unwrap_or_else(|e| panic!("{model}: HF encode({input:?}): {e}"))
+            .get_ids()
+            .to_vec();
+        let our_ids = ours
+            .encode_with_options(input, false, false)
+            .unwrap_or_else(|e| panic!("{model}: fastokens encode({input:?}): {e}"));
+        assert_eq!(our_ids, hf_ids, "default special-token matching mismatch");
+    }
+
+    /// Verify that `split_special_tokens=true` matches HuggingFace
+    /// `tokenizers` when a non-special added token's content is contained
+    /// within a special added token's content.
+    ///
+    /// Config: special `<mask>` (id 6) + non-special `mask` (id 7), input
+    /// `<mask>`. HF runs the full leftmost-longest matcher, so `<mask>`
+    /// (special) wins over `mask` (non-special) and — with
+    /// `encode_special_tokens=true` — the matched span is tokenized as
+    /// ordinary text, yielding the char-level ids `[0,1,2,3,4,5]`. fastokens
+    /// should do the same rather than letting `mask` match inside the special
+    /// span as added-token id 7.
+    ///
+    /// The added-token ids are chosen as `vocab_size + index` (6, 7) because HF
+    /// `tokenizers` ignores the `id` field in `added_tokens` and assigns ids
+    /// sequentially from the model vocab size; fastokens respects the `id`
+    /// field, so the two only agree when the JSON ids match HF's assignment.
+    ///
+    /// The default-path baseline (`split_special_tokens=false`) confirms the
+    /// tokenizer JSON is valid for both backends.
+    #[test]
+    fn split_special_tokens_overlapping_non_special_matches_hf() {
+        let json = r#"{
+          "version": "1.0",
+          "added_tokens": [
+            {"id": 6, "content": "<mask>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+            {"id": 7, "content": "mask", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false}
+          ],
+          "normalizer": null,
+          "pre_tokenizer": null,
+          "post_processor": null,
+          "decoder": null,
+          "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": "",
+            "end_of_word_suffix": "",
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {"<": 0, "m": 1, "a": 2, "s": 3, "k": 4, ">": 5},
+            "merges": []
+          }
+        }"#;
+
+        let mut hf = tokenizers::Tokenizer::from_str(json).expect("HF load failed");
+        let ours = Tokenizer::from_json(serde_json::from_str(json).unwrap())
+            .expect("fastokens load failed");
+
+        // Baseline: default path (split=false) — both emit the special id.
+        hf.set_encode_special_tokens(false);
+        let hf_default: Vec<u32> = hf.encode("<mask>", false).unwrap().get_ids().to_vec();
+        let our_default = ours.encode_with_options("<mask>", false, false).unwrap();
+        assert_eq!(
+            our_default, hf_default,
+            "default path baseline: fastokens must match HF"
+        );
+        assert_eq!(
+            our_default,
+            vec![6],
+            "default path should emit the special id"
+        );
+
+        // Split path (split=true): HF tokenizes the whole <mask> as text.
+        hf.set_encode_special_tokens(true);
+        let hf_split: Vec<u32> = hf.encode("<mask>", false).unwrap().get_ids().to_vec();
+        let our_split = ours.encode_with_options("<mask>", false, true).unwrap();
+
+        assert_eq!(
+            hf_split,
+            vec![0, 1, 2, 3, 4, 5],
+            "HF should tokenize the special span as ordinary text"
+        );
+        assert_eq!(
+            our_split, hf_split,
+            "split_special_tokens=true should match HF by tokenizing the whole \
+             special span as text"
+        );
     }
 
     // ── Cache consistency ────────────────────────────────────────────
