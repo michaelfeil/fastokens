@@ -42,7 +42,7 @@ pub enum TemplatePiece {
 }
 
 /// Special token definition as stored in the tokenizer JSON.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SpecialTokenDef {
     id: String,
     ids: Vec<u32>,
@@ -57,7 +57,7 @@ struct SpecialTokenDef {
 /// For single-sequence encoding, iterates over the `single` template:
 /// `Sequence` pieces are replaced by the encoded token IDs, `SpecialToken`
 /// pieces are replaced by the looked-up IDs from `special_tokens`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TemplateProcessing {
     single: Vec<TemplatePiece>,
     #[allow(dead_code)]
@@ -137,7 +137,7 @@ impl TemplateProcessing {
 /// Since this tokenizer only produces token IDs (not offset information),
 /// `ByteLevel` is a no-op. `TemplateProcessing` inserts special tokens
 /// (BOS/EOS/CLS/SEP) when `add_special_tokens` is true.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PostProcessor {
     ByteLevel,
     TemplateProcessing(TemplateProcessing),
