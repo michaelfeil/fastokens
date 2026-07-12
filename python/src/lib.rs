@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, LazyLock, RwLock},
 };
 
+use numpy::IntoPyArray;
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyString};
@@ -134,6 +135,58 @@ impl PyEncoding {
 
     fn __repr__(&self) -> String {
         format!("Encoding(num_tokens={})", self.ids.len())
+    }
+
+    /// Move selected fields into NumPy uint32 arrays.
+    ///
+    /// This consumes/drains the encoding's per-token fields. The returned dict
+    /// contains only requested arrays; unrequested fields are cleared.
+    #[pyo3(signature = (
+        ids = true,
+        attention_mask = false,
+        type_ids = false,
+        special_tokens_mask = false
+    ))]
+    fn into_numpy<'py>(
+        &mut self,
+        py: Python<'py>,
+        ids: bool,
+        attention_mask: bool,
+        type_ids: bool,
+        special_tokens_mask: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if !(ids || attention_mask || type_ids || special_tokens_mask) {
+            return Err(PyValueError::new_err(
+                "at least one field must be selected for into_numpy()",
+            ));
+        }
+
+        let out = PyDict::new(py);
+        let ids_vec = std::mem::take(&mut self.ids);
+        let attention_mask_vec = std::mem::take(&mut self.attention_mask);
+        let type_ids_vec = std::mem::take(&mut self.type_ids);
+        let special_tokens_mask_vec = std::mem::take(&mut self.special_tokens_mask);
+        std::mem::take(&mut self._sequence_ids);
+        std::mem::take(&mut self._word_ids);
+        self.n_sequences = 0;
+
+        if ids {
+            out.set_item("ids", ids_vec.into_pyarray(py))?;
+        }
+        if attention_mask {
+            out.set_item("attention_mask", attention_mask_vec.into_pyarray(py))?;
+        }
+        if type_ids {
+            out.set_item("type_ids", type_ids_vec.into_pyarray(py))?;
+        }
+        if special_tokens_mask {
+            out.set_item(
+                "special_tokens_mask",
+                special_tokens_mask_vec.into_pyarray(py),
+            )?;
+        }
+
+        Ok(out)
     }
 
     // -- Properties that raise NotImplementedError ----------------------

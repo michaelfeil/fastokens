@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 class Encoding:
     """Rust-backed encoding returned by ``Tokenizer.encode`` / ``encode_batch``."""
@@ -18,6 +18,15 @@ class Encoding:
 
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
+    def into_numpy(
+        self,
+        ids: bool = True,
+        attention_mask: bool = False,
+        type_ids: bool = False,
+        special_tokens_mask: bool = False,
+    ) -> dict[str, Any]:
+        """Move selected fields into numpy.uint32 arrays and drain the encoding."""
+        ...
 
     # Properties that raise NotImplementedError
     @property

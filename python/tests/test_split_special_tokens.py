@@ -2,8 +2,10 @@ import json
 import unittest
 from copy import deepcopy
 
+import numpy as np
+
 from fastokens._compat import _TokenizerShim
-from fastokens._native import StructuralTokenConfig, Tokenizer
+from fastokens._native import Encoding, StructuralTokenConfig, Tokenizer
 
 
 BOS_TOKEN = "[BOS]"
@@ -266,6 +268,64 @@ class SplitSpecialTokensTests(unittest.TestCase):
                 *_char_ids(tokenizer_json, "<tool>"),
             ],
         )
+
+    def test_encoding_into_numpy_moves_selected_fields(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        arrays = encoding.into_numpy(
+            attention_mask=True,
+            type_ids=True,
+            special_tokens_mask=True,
+        )
+
+        self.assertEqual(
+            set(arrays),
+            {"ids", "attention_mask", "type_ids", "special_tokens_mask"},
+        )
+        ids = arrays["ids"]
+        self.assertEqual(ids.dtype, np.dtype("uint32"))
+        np.testing.assert_array_equal(ids, np.array([1, 2, 3], dtype=np.uint32))
+        np.testing.assert_array_equal(
+            arrays["attention_mask"],
+            np.array([1, 1, 1], dtype=np.uint32),
+        )
+        np.testing.assert_array_equal(
+            arrays["type_ids"],
+            np.array([0, 0, 0], dtype=np.uint32),
+        )
+        np.testing.assert_array_equal(
+            arrays["special_tokens_mask"],
+            np.array([0, 0, 0], dtype=np.uint32),
+        )
+        self.assertEqual(encoding.ids, [])
+        self.assertEqual(encoding.attention_mask, [])
+        self.assertEqual(encoding.type_ids, [])
+        self.assertEqual(encoding.special_tokens_mask, [])
+        self.assertEqual(encoding.n_sequences, 0)
+
+    def test_encoding_into_numpy_can_skip_ids(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        arrays = encoding.into_numpy(ids=False, attention_mask=True)
+
+        self.assertEqual(set(arrays), {"attention_mask"})
+        np.testing.assert_array_equal(
+            arrays["attention_mask"],
+            np.array([1, 1, 1], dtype=np.uint32),
+        )
+        self.assertEqual(encoding.ids, [])
+        self.assertEqual(encoding.attention_mask, [])
+
+    def test_encoding_into_numpy_rejects_empty_selection(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        with self.assertRaisesRegex(ValueError, "at least one field"):
+            encoding.into_numpy(
+                ids=False,
+                attention_mask=False,
+                type_ids=False,
+                special_tokens_mask=False,
+            )
 
     def test_native_encode_with_structural_tokens_can_add_special_tokens(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
