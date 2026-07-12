@@ -976,6 +976,12 @@ impl PyTokenizer {
     fn vocab_size(&self) -> usize {
         self.read().inner.vocab_size()
     }
+
+    /// Stable semantic fingerprint for this tokenizer's behavior.
+    #[getter]
+    fn fingerprint(&self) -> String {
+        self.read().inner.fingerprint().to_hex()
+    }
 }
 
 // ---------------------------------------------------------------------------
