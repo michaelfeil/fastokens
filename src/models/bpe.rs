@@ -749,7 +749,9 @@ impl Bpe {
                 if is_orphan[token as usize] {
                     return None;
                 }
-                byte_level_token_to_raw(text).map(|raw| (raw, token))
+                byte_level_token_to_raw(text).and_then(|raw| {
+                    raw_token_reaches_id(&raw, token, vocab, &merge_map).then_some((raw, token))
+                })
             })
             .collect();
 
@@ -1317,6 +1319,47 @@ fn byte_level_token_to_raw(token: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn raw_token_reaches_id(
+    raw: &str,
+    expected_token: TokenId,
+    vocab: &Vocab,
+    merge_map: &ParsedMergeMap,
+) -> bool {
+    let mut tokens = Vec::with_capacity(raw.len());
+    for &byte in raw.as_bytes() {
+        let ch = BYTE_TO_CHAR[byte as usize];
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let Some(&id) = vocab.get(s) else {
+            return false;
+        };
+        tokens.push(id);
+    }
+
+    while tokens.len() > 1 {
+        let mut best_rank = u32::MAX;
+        let mut best_pos = usize::MAX;
+        let mut best_new = 0;
+        for i in 0..tokens.len() - 1 {
+            let pair = (tokens[i], tokens[i + 1]);
+            if let Some(&(rank, new_id)) = merge_map.get(&pair)
+                && rank < best_rank
+            {
+                best_rank = rank;
+                best_pos = i;
+                best_new = new_id;
+            }
+        }
+        if best_pos == usize::MAX {
+            break;
+        }
+        tokens[best_pos] = best_new;
+        tokens.remove(best_pos + 1);
+    }
+
+    tokens == [expected_token]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,5 +1523,33 @@ mod tests {
         bpe.tokenize_batch_fused(&buffer, &splits, &mut batch_ids)
             .unwrap();
         assert_eq!(batch_ids, vec![9, 99]);
+    }
+
+    #[test]
+    fn fused_raw_exact_lookup_skips_unreachable_byte_level_token() {
+        let vocab: Vocab = [
+            ("a", 0),
+            ("b", 1),
+            ("c", 2),
+            ("ab", 3),
+            ("bc", 4),
+            ("abc", 5),
+        ]
+        .into_iter()
+        .map(|(s, id)| (s.to_string(), id))
+        .collect();
+        let merges = vec![
+            Value::String("b c".into()),
+            Value::String("a b".into()),
+            Value::String("ab c".into()),
+        ];
+        let merge_map = parse_merges(&vocab, &merges).unwrap();
+        let bpe = Bpe::new(&vocab, merge_map).unwrap();
+
+        assert_eq!(bpe.raw_token_to_id.get("abc"), None);
+
+        let mut ids = Vec::new();
+        bpe.tokenize_into_fused("abc", &mut ids).unwrap();
+        assert_eq!(ids, vec![0, 4]);
     }
 }

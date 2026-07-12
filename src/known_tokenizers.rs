@@ -173,10 +173,7 @@ mod tests {
             from_model_id("openai/gpt-oss-120b"),
             Some(KnownTokenizer::GptOss120b),
         );
-        assert_eq!(
-            from_model_id("zai-org/GLM-4.7"),
-            Some(KnownTokenizer::Glm),
-        );
+        assert_eq!(from_model_id("zai-org/GLM-4.7"), Some(KnownTokenizer::Glm),);
         assert_eq!(from_model_id("unknown/model"), None);
     }
 
