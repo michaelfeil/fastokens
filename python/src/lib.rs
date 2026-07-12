@@ -143,7 +143,14 @@ impl PyEncoding {
     /// `self.ids` empty. Use this when callers only need token IDs and want to
     /// avoid materializing Python `int` objects.
     fn to_numpy<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
-        std::mem::take(&mut self.ids).into_pyarray(py)
+        let ids = std::mem::take(&mut self.ids);
+        self.attention_mask.clear();
+        self.type_ids.clear();
+        self.special_tokens_mask.clear();
+        self._sequence_ids.clear();
+        self._word_ids.clear();
+        self.n_sequences = 0;
+        ids.into_pyarray(py)
     }
 
     // -- Properties that raise NotImplementedError ----------------------

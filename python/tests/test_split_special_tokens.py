@@ -277,6 +277,10 @@ class SplitSpecialTokensTests(unittest.TestCase):
         self.assertEqual(ids.dtype, np.dtype("uint32"))
         np.testing.assert_array_equal(ids, np.array([1, 2, 3], dtype=np.uint32))
         self.assertEqual(encoding.ids, [])
+        self.assertEqual(encoding.attention_mask, [])
+        self.assertEqual(encoding.type_ids, [])
+        self.assertEqual(encoding.special_tokens_mask, [])
+        self.assertEqual(encoding.n_sequences, 0)
 
     def test_native_encode_with_structural_tokens_to_numpy(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
