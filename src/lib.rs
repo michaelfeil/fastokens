@@ -86,14 +86,27 @@ mod hf_hub_support {
     }
 
     fn download_or_factory_tokenizer_json(api: &Api, model: &str) -> Result<String, Error> {
+        // Prefer the vendored (compile-time embedded) JSON for known models so
+        // that callers never hit the network for tokenizer families whose assets
+        // are already bundled in the binary.
+        if let Some(raw) = known_tokenizers::vendored_tokenizer_json(model) {
+            return Ok(raw.to_string());
+        }
+
+        #[cfg(feature = "known-tokenizer-aliases")]
+        if let Some(canonical) = known_tokenizers::canonical_model_id(model)
+            && canonical != model
+        {
+            if let Some(raw) = known_tokenizers::vendored_tokenizer_json(canonical) {
+                return Ok(raw.to_string());
+            }
+        }
+
+        // Fall back to the HuggingFace Hub for models without a vendored copy.
         let repo = api.model(model.to_string());
         match repo.get("tokenizer.json") {
             Ok(json_path) => Ok(fs::read_to_string(json_path)?),
             Err(err) => {
-                if let Some(raw) = known_tokenizers::vendored_tokenizer_json(model) {
-                    return Ok(raw.to_string());
-                }
-
                 #[cfg(feature = "known-tokenizer-aliases")]
                 if let Some(canonical) = known_tokenizers::canonical_model_id(model)
                     && canonical != model
@@ -101,9 +114,6 @@ mod hf_hub_support {
                     let canonical_repo = api.model(canonical.to_string());
                     if let Ok(json_path) = canonical_repo.get("tokenizer.json") {
                         return Ok(fs::read_to_string(json_path)?);
-                    }
-                    if let Some(raw) = known_tokenizers::vendored_tokenizer_json(canonical) {
-                        return Ok(raw.to_string());
                     }
                 }
 

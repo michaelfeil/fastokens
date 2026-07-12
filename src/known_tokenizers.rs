@@ -18,6 +18,8 @@ pub(crate) enum KnownTokenizer {
     Qwen3,
     KimiK25,
     Llama3,
+    GptOss120b,
+    Glm,
 }
 
 impl KnownTokenizer {
@@ -26,6 +28,8 @@ impl KnownTokenizer {
             Self::Qwen3 => "qwen3",
             Self::KimiK25 => "kimi-k2.5",
             Self::Llama3 => "llama3",
+            Self::GptOss120b => "gpt-oss-120b",
+            Self::Glm => "glm-5.2",
         }
     }
 
@@ -35,6 +39,8 @@ impl KnownTokenizer {
             Self::Qwen3 => "Qwen/Qwen3-0.6B",
             Self::KimiK25 => "hoangquan456/Kimi-K2.5",
             Self::Llama3 => "meta-llama/Meta-Llama-3-8B",
+            Self::GptOss120b => "openai/gpt-oss-120b",
+            Self::Glm => "zai-org/GLM-4.7",
         }
     }
 }
@@ -64,6 +70,8 @@ pub(crate) fn from_model_id(model: &str) -> Option<KnownTokenizer> {
         | "meta-llama/Llama-3.2-1B-Instruct"
         | "meta-llama/Llama-3.2-3B"
         | "meta-llama/Llama-3.2-3B-Instruct" => Some(KnownTokenizer::Llama3),
+        "openai/gpt-oss-120b" => Some(KnownTokenizer::GptOss120b),
+        "zai-org/GLM-4.7" => Some(KnownTokenizer::Glm),
         _ => None,
     }
 }
@@ -83,10 +91,21 @@ pub(crate) fn fingerprint(json: &TokenizerJson) -> Option<KnownTokenizer> {
 
 #[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) fn vendored_tokenizer_json(model: &str) -> Option<&'static str> {
-    from_model_id(model)?;
-    // Placeholder for tokenizer JSON blobs once redistribution/license checks
-    // have been completed for each known tokenizer family.
-    None
+    match from_model_id(model)? {
+        KnownTokenizer::Qwen3 => Some(include_str!(
+            "../vendored_tokenizers/qwen3-8b/tokenizer.json"
+        )),
+        KnownTokenizer::KimiK25 => Some(include_str!(
+            "../vendored_tokenizers/kimi-k2.5/tokenizer.json"
+        )),
+        KnownTokenizer::GptOss120b => Some(include_str!(
+            "../vendored_tokenizers/gpt-oss-120b/tokenizer.json"
+        )),
+        KnownTokenizer::Glm => Some(include_str!(
+            "../vendored_tokenizers/glm-5.2/tokenizer.json"
+        )),
+        KnownTokenizer::Llama3 => None,
+    }
 }
 
 fn has_qwen3_split_pattern(json: &TokenizerJson) -> bool {
@@ -150,7 +169,30 @@ mod tests {
             from_model_id("meta-llama/Meta-Llama-3.1-70B-Instruct"),
             Some(KnownTokenizer::Llama3),
         );
+        assert_eq!(
+            from_model_id("openai/gpt-oss-120b"),
+            Some(KnownTokenizer::GptOss120b),
+        );
+        assert_eq!(
+            from_model_id("zai-org/GLM-4.7"),
+            Some(KnownTokenizer::Glm),
+        );
         assert_eq!(from_model_id("unknown/model"), None);
+    }
+
+    #[test]
+    fn vendored_tokenizer_json_parses_for_all_vendored_families() {
+        for model in &[
+            "Qwen/Qwen3-0.6B",
+            "hoangquan456/Kimi-K2.5",
+            "openai/gpt-oss-120b",
+            "zai-org/GLM-4.7",
+        ] {
+            let raw = vendored_tokenizer_json(model)
+                .unwrap_or_else(|| panic!("{model}: no vendored JSON"));
+            serde_json::from_str::<serde_json::Value>(raw)
+                .unwrap_or_else(|e| panic!("{model}: invalid JSON: {e}"));
+        }
     }
 
     #[test]
