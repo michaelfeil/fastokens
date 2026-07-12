@@ -54,6 +54,14 @@ def _write_tiktoken_model(path: Path, encoding) -> None:
     )
 
 
+def _merge_counter(merges: list[list[str]]) -> Counter[tuple[str, str]]:
+    return Counter(tuple(merge) for merge in merges)
+
+
+def _special_token_map(added_tokens: list[dict[str, object]]) -> dict[str, int]:
+    return {t["content"]: t["id"] for t in added_tokens if t.get("special")}
+
+
 def test_tiktoken_to_tokenizer_json_matches_encoding() -> None:
     encoding = _create_test_encoding()
     tokenizer = Tokenizer.from_json_str(tiktoken_to_tokenizer_json(encoding))
@@ -217,16 +225,10 @@ def test_kimi_k2_5_tiktoken_gz_conversion_matches_vendored_tokenizer_json(tmp_pa
     assert len(converted_model["vocab"]) == len(vendored_model["vocab"])
     assert converted_model["vocab"] == vendored_model["vocab"]
     assert len(converted_model["merges"]) == len(vendored_model["merges"])
-    assert Counter(tuple(m) for m in converted_model["merges"]) == Counter(
-        tuple(m) for m in vendored_model["merges"]
-    )
+    assert _merge_counter(converted_model["merges"]) == _merge_counter(vendored_model["merges"])
 
-    converted_special_tokens = {
-        t["content"]: t["id"] for t in converted["added_tokens"] if t.get("special")
-    }
-    vendored_special_tokens = {
-        t["content"]: t["id"] for t in vendored["added_tokens"] if t.get("special")
-    }
+    converted_special_tokens = _special_token_map(converted["added_tokens"])
+    vendored_special_tokens = _special_token_map(vendored["added_tokens"])
     assert converted_special_tokens == vendored_special_tokens
 
     corpus = [
