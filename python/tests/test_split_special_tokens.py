@@ -269,20 +269,65 @@ class SplitSpecialTokensTests(unittest.TestCase):
             ],
         )
 
-    def test_encoding_to_numpy_moves_ids(self) -> None:
+    def test_encoding_into_numpy_moves_selected_fields(self) -> None:
         encoding = Encoding([1, 2, 3])
 
-        ids = encoding.to_numpy()
+        arrays = encoding.into_numpy(
+            attention_mask=True,
+            type_ids=True,
+            special_tokens_mask=True,
+        )
 
+        self.assertEqual(
+            set(arrays),
+            {"ids", "attention_mask", "type_ids", "special_tokens_mask"},
+        )
+        ids = arrays["ids"]
         self.assertEqual(ids.dtype, np.dtype("uint32"))
         np.testing.assert_array_equal(ids, np.array([1, 2, 3], dtype=np.uint32))
+        np.testing.assert_array_equal(
+            arrays["attention_mask"],
+            np.array([1, 1, 1], dtype=np.uint32),
+        )
+        np.testing.assert_array_equal(
+            arrays["type_ids"],
+            np.array([0, 0, 0], dtype=np.uint32),
+        )
+        np.testing.assert_array_equal(
+            arrays["special_tokens_mask"],
+            np.array([0, 0, 0], dtype=np.uint32),
+        )
         self.assertEqual(encoding.ids, [])
         self.assertEqual(encoding.attention_mask, [])
         self.assertEqual(encoding.type_ids, [])
         self.assertEqual(encoding.special_tokens_mask, [])
         self.assertEqual(encoding.n_sequences, 0)
 
-    def test_native_encode_with_structural_tokens_to_numpy(self) -> None:
+    def test_encoding_into_numpy_can_skip_ids(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        arrays = encoding.into_numpy(ids=False, attention_mask=True)
+
+        self.assertEqual(set(arrays), {"attention_mask"})
+        np.testing.assert_array_equal(
+            arrays["attention_mask"],
+            np.array([1, 1, 1], dtype=np.uint32),
+        )
+        self.assertEqual(encoding.ids, [])
+        self.assertEqual(encoding.attention_mask, [])
+
+    def test_encoding_into_numpy_rejects_empty_selection(self) -> None:
+        encoding = Encoding([1, 2, 3])
+
+        with self.assertRaisesRegex(ValueError, "at least one field"):
+            encoding.into_numpy(
+                ids=False,
+                attention_mask=False,
+                type_ids=False,
+                special_tokens_mask=False,
+            )
+
+    def test_native_encode_with_structural_tokens_into_numpy(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
         tokenizer = Tokenizer.from_json_str(tokenizer_json)
         think_placeholder = "\ue000STRUCTTOK_0\ue000"
@@ -290,21 +335,22 @@ class SplitSpecialTokensTests(unittest.TestCase):
         placeholder_map = {think_placeholder: "<think>"}
         prompt = f"<think>{think_placeholder}"
 
-        encoding = tokenizer.encode_with_structural_tokens(
+        expected = tokenizer.encode_with_structural_tokens(
             prompt,
             structural_config,
             placeholder_map,
-        )
-        ids = tokenizer.encode_with_structural_tokens_to_numpy(
+        ).ids
+        arrays = tokenizer.encode_with_structural_tokens(
             prompt,
             structural_config,
             placeholder_map,
-        )
+        ).into_numpy()
 
+        ids = arrays["ids"]
         self.assertEqual(ids.dtype, np.dtype("uint32"))
         np.testing.assert_array_equal(
             ids,
-            np.array(encoding.ids, dtype=np.uint32),
+            np.array(expected, dtype=np.uint32),
         )
 
     def test_native_encode_with_structural_tokens_can_add_special_tokens(self) -> None:
@@ -389,16 +435,17 @@ class SplitSpecialTokensTests(unittest.TestCase):
             [SPECIAL_ID, *_char_ids(tokenizer_json, "<think>")],
         )
 
-    def test_shim_forwards_encode_with_structural_tokens_to_numpy(self) -> None:
+    def test_shim_supports_structural_encoding_into_numpy(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
         tokenizer = _TokenizerShim.from_str(tokenizer_json)
         structural_config = StructuralTokenConfig({"<think>"})
 
-        ids = tokenizer.encode_with_structural_tokens_to_numpy(
+        arrays = tokenizer.encode_with_structural_tokens(
             "<think>",
             structural_config,
-        )
+        ).into_numpy()
 
+        ids = arrays["ids"]
         self.assertEqual(ids.dtype, np.dtype("uint32"))
         np.testing.assert_array_equal(ids, np.array([SPECIAL_ID], dtype=np.uint32))
 

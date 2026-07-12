@@ -18,8 +18,14 @@ class Encoding:
 
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
-    def to_numpy(self) -> Any:
-        """Move IDs into a numpy.uint32 array and leave ``ids`` empty."""
+    def into_numpy(
+        self,
+        ids: bool = True,
+        attention_mask: bool = False,
+        type_ids: bool = False,
+        special_tokens_mask: bool = False,
+    ) -> dict[str, Any]:
+        """Move selected fields into numpy.uint32 arrays and drain the encoding."""
         ...
 
     # Properties that raise NotImplementedError
@@ -168,16 +174,6 @@ class Tokenizer:
         existing rendered chat-template encode path. Backend truncation and
         padding settings are intentionally not applied.
         """
-        ...
-
-    def encode_with_structural_tokens_to_numpy(
-        self,
-        input: str,
-        structural_config: StructuralTokenConfig,
-        placeholder_map: Optional[dict[str, str]] = None,
-        add_special_tokens: bool = False,
-    ) -> Any:
-        """Encode structural text and return raw IDs as a numpy.uint32 array."""
         ...
 
     async def async_encode_batch(

@@ -289,21 +289,6 @@ class _TokenizerShim:
             add_special_tokens=add_special_tokens,
         )
 
-    def encode_with_structural_tokens_to_numpy(
-        self,
-        sequence: str,
-        structural_config,
-        placeholder_map: dict[str, str] | None = None,
-        add_special_tokens: bool = False,
-    ):
-        """Encode rendered template text with structural-token boundaries as uint32."""
-        return self._fast.encode_with_structural_tokens_to_numpy(
-            sequence,
-            structural_config,
-            placeholder_map or {},
-            add_special_tokens=add_special_tokens,
-        )
-
     async def async_encode_batch(
         self,
         inputs: list[str],
