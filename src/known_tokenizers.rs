@@ -16,14 +16,25 @@ use crate::{
 #[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
 pub(crate) enum KnownTokenizer {
     Qwen3,
-    KimiK2_5,
+    KimiK25,
+    Llama3,
 }
 
 impl KnownTokenizer {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Qwen3 => "qwen3",
-            Self::KimiK2_5 => "kimi-k2.5",
+            Self::KimiK25 => "kimi-k2.5",
+            Self::Llama3 => "llama3",
+        }
+    }
+
+    #[cfg(feature = "known-tokenizer-aliases")]
+    pub(crate) fn canonical_model_id(self) -> &'static str {
+        match self {
+            Self::Qwen3 => "Qwen/Qwen3-0.6B",
+            Self::KimiK25 => "hoangquan456/Kimi-K2.5",
+            Self::Llama3 => "meta-llama/Meta-Llama-3-8B",
         }
     }
 }
@@ -38,9 +49,29 @@ pub(crate) fn from_model_id(model: &str) -> Option<KnownTokenizer> {
         | "Qwen/Qwen3-Next-80B-A3B-Instruct"
         | "Qwen/Qwen3.5-397B-A17B"
         | "nvidia/Qwen3-Nemotron-235B-A22B-GenRM" => Some(KnownTokenizer::Qwen3),
-        "hoangquan456/Kimi-K2.5" => Some(KnownTokenizer::KimiK2_5),
+        "hoangquan456/Kimi-K2.5" => Some(KnownTokenizer::KimiK25),
+        "meta-llama/Meta-Llama-3-8B"
+        | "meta-llama/Meta-Llama-3-8B-Instruct"
+        | "meta-llama/Meta-Llama-3-70B"
+        | "meta-llama/Meta-Llama-3-70B-Instruct"
+        | "meta-llama/Meta-Llama-3.1-8B"
+        | "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        | "meta-llama/Meta-Llama-3.1-70B"
+        | "meta-llama/Meta-Llama-3.1-70B-Instruct"
+        | "meta-llama/Meta-Llama-3.1-405B"
+        | "meta-llama/Meta-Llama-3.1-405B-Instruct"
+        | "meta-llama/Llama-3.2-1B"
+        | "meta-llama/Llama-3.2-1B-Instruct"
+        | "meta-llama/Llama-3.2-3B"
+        | "meta-llama/Llama-3.2-3B-Instruct" => Some(KnownTokenizer::Llama3),
         _ => None,
     }
+}
+
+#[cfg(feature = "known-tokenizer-aliases")]
+#[cfg_attr(not(feature = "hf-hub"), allow(dead_code))]
+pub(crate) fn canonical_model_id(model: &str) -> Option<&'static str> {
+    from_model_id(model).map(KnownTokenizer::canonical_model_id)
 }
 
 pub(crate) fn fingerprint(json: &TokenizerJson) -> Option<KnownTokenizer> {
@@ -113,9 +144,27 @@ mod tests {
         );
         assert_eq!(
             from_model_id("hoangquan456/Kimi-K2.5"),
-            Some(KnownTokenizer::KimiK2_5),
+            Some(KnownTokenizer::KimiK25),
+        );
+        assert_eq!(
+            from_model_id("meta-llama/Meta-Llama-3.1-70B-Instruct"),
+            Some(KnownTokenizer::Llama3),
         );
         assert_eq!(from_model_id("unknown/model"), None);
+    }
+
+    #[test]
+    #[cfg(feature = "known-tokenizer-aliases")]
+    fn aliases_route_to_canonical_model_ids() {
+        assert_eq!(
+            canonical_model_id("Qwen/Qwen3-Next-80B-A3B-Instruct"),
+            Some("Qwen/Qwen3-0.6B"),
+        );
+        assert_eq!(
+            canonical_model_id("meta-llama/Meta-Llama-3.1-70B-Instruct"),
+            Some("meta-llama/Meta-Llama-3-8B"),
+        );
+        assert_eq!(canonical_model_id("unknown/model"), None);
     }
 
     #[test]

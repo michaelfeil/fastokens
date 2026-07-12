@@ -41,7 +41,8 @@ use self::{
 mod hf_hub_support {
     pub use hf_hub::api::sync::ApiError;
 
-    use super::{Error, Tokenizer, TokenizerJson, known_tokenizers};
+    use super::known_tokenizers;
+    use super::{Error, Tokenizer, TokenizerJson};
     use hf_hub::api::sync::{Api, ApiBuilder};
     use std::fs;
 
@@ -70,14 +71,7 @@ mod hf_hub_support {
     pub fn from_model_with_token(model: &str, token: Option<&str>) -> Result<Tokenizer, Error> {
         validate_model_id(model)?;
         let api = make_api(token)?;
-        let repo = api.model(model.to_string());
-        let raw = match repo.get("tokenizer.json") {
-            Ok(json_path) => fs::read_to_string(json_path)?,
-            Err(err) => match known_tokenizers::vendored_tokenizer_json(model) {
-                Some(raw) => raw.to_string(),
-                None => return Err(err.into()),
-            },
-        };
+        let raw = download_or_factory_tokenizer_json(&api, model)?;
         let json: TokenizerJson = serde_json::from_str(&raw)?;
         Tokenizer::build(json)
     }
@@ -87,13 +81,33 @@ mod hf_hub_support {
     pub fn download_tokenizer_json(model: &str) -> Result<String, Error> {
         validate_model_id(model)?;
         let api = make_api(None)?;
+        download_or_factory_tokenizer_json(&api, model)
+    }
+
+    fn download_or_factory_tokenizer_json(api: &Api, model: &str) -> Result<String, Error> {
         let repo = api.model(model.to_string());
         match repo.get("tokenizer.json") {
             Ok(json_path) => Ok(fs::read_to_string(json_path)?),
-            Err(err) => match known_tokenizers::vendored_tokenizer_json(model) {
-                Some(raw) => Ok(raw.to_string()),
-                None => Err(err.into()),
-            },
+            Err(err) => {
+                if let Some(raw) = known_tokenizers::vendored_tokenizer_json(model) {
+                    return Ok(raw.to_string());
+                }
+
+                #[cfg(feature = "known-tokenizer-aliases")]
+                if let Some(canonical) = known_tokenizers::canonical_model_id(model)
+                    && canonical != model
+                {
+                    let canonical_repo = api.model(canonical.to_string());
+                    if let Ok(json_path) = canonical_repo.get("tokenizer.json") {
+                        return Ok(fs::read_to_string(json_path)?);
+                    }
+                    if let Some(raw) = known_tokenizers::vendored_tokenizer_json(canonical) {
+                        return Ok(raw.to_string());
+                    }
+                }
+
+                Err(err.into())
+            }
         }
     }
 }
