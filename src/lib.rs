@@ -184,12 +184,11 @@ impl fmt::Display for TokenizerFingerprint {
     }
 }
 
-static TOKENIZER_ARTIFACT_CACHE: OnceLock<
-    Mutex<HashMap<TokenizerFingerprint, Arc<TokenizerArtifacts>>>,
-> = OnceLock::new();
+type TokenizerArtifactCache = Mutex<HashMap<TokenizerFingerprint, Arc<TokenizerArtifacts>>>;
 
-fn tokenizer_artifact_cache()
--> &'static Mutex<HashMap<TokenizerFingerprint, Arc<TokenizerArtifacts>>> {
+static TOKENIZER_ARTIFACT_CACHE: OnceLock<TokenizerArtifactCache> = OnceLock::new();
+
+fn tokenizer_artifact_cache() -> &'static TokenizerArtifactCache {
     TOKENIZER_ARTIFACT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
