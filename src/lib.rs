@@ -194,6 +194,9 @@ fn tokenizer_artifact_cache() -> &'static TokenizerArtifactCache {
 
 fn semantic_fingerprint(json: &Value) -> TokenizerFingerprint {
     let mut hasher = StableHasher::new();
+    // Bump this version only when the semantic fields or canonical hashing
+    // rules change. Existing in-process cache entries are intentionally
+    // invalidated because the digest no longer represents the same identity.
     hasher.write_str("fastokens-tokenizer-v1");
     if let Value::Object(map) = json {
         for key in [
