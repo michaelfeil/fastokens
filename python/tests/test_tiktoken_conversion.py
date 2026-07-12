@@ -1,11 +1,14 @@
 import base64
 import builtins
+import gzip
 import json
 from pathlib import Path
 
 import pytest
 
 from fastokens import Tokenizer, tiktoken_model_to_tokenizer_json, tiktoken_to_tokenizer_json
+
+VENDORED_DIR = Path(__file__).parents[2] / "vendored_tokenizers"
 
 
 @pytest.fixture
@@ -164,3 +167,59 @@ def test_tiktoken_model_to_tokenizer_json_raises_for_invalid_file(tmp_path) -> N
 
     with pytest.raises(ValueError, match="invalid tiktoken model"):
         tiktoken_model_to_tokenizer_json(model_path)
+
+
+def test_kimi_k2_5_tiktoken_gz_conversion_matches_vendored_tokenizer_json(tmp_path) -> None:
+    """Convert the vendored Kimi K2.5 tiktoken.model.gz on the fly and verify
+    that encoding results match the vendored tokenizer.json for a corpus of
+    test strings.  Requires tiktoken; skipped otherwise."""
+    pytest.importorskip("tiktoken")
+
+    kimi_dir = VENDORED_DIR / "kimi-k2.5"
+    gz_path = kimi_dir / "tiktoken.model.gz"
+    vendored_json_path = kimi_dir / "tokenizer.json"
+
+    if not gz_path.exists() or not vendored_json_path.exists():
+        pytest.skip("vendored kimi-k2.5 assets not found")
+
+    # Decompress the tiktoken model to a temporary plain file.
+    model_path = tmp_path / "tiktoken.model"
+    model_path.write_bytes(gzip.decompress(gz_path.read_bytes()))
+
+    # Extract the pre-tokenizer pattern and special tokens from the vendored
+    # tokenizer.json so the conversion uses exactly the same configuration.
+    vendored = json.loads(vendored_json_path.read_text())
+    pattern: str = vendored["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"]
+    special_tokens: dict[str, int] = {
+        t["content"]: t["id"]
+        for t in vendored["added_tokens"]
+        if t.get("special")
+    }
+
+    # Convert the tiktoken model to a tokenizer JSON and build a Tokenizer.
+    converted_json = tiktoken_model_to_tokenizer_json(
+        model_path,
+        pattern=pattern,
+        special_tokens=special_tokens,
+    )
+    assert converted_json is not None, "tiktoken_model_to_tokenizer_json returned None"
+    converted_tok = Tokenizer.from_json_str(converted_json)
+
+    # Also build a Tokenizer directly from the vendored tokenizer.json.
+    vendored_tok = Tokenizer.from_json_str(vendored_json_path.read_text())
+
+    corpus = [
+        "Hello, world!",
+        "1 + 2 = 3",
+        "The quick brown fox jumps over the lazy dog.",
+        "你好，世界",
+        "fastokens converts tiktoken models on the fly",
+    ]
+    for text in corpus:
+        converted_ids = converted_tok.encode(text, add_special_tokens=False).ids
+        vendored_ids = vendored_tok.encode(text, add_special_tokens=False).ids
+        assert converted_ids == vendored_ids, (
+            f"encoding mismatch for {text!r}:\n"
+            f"  converted : {converted_ids}\n"
+            f"  vendored  : {vendored_ids}"
+        )
