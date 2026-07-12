@@ -1,5 +1,6 @@
 import base64
 import builtins
+from collections import Counter
 import gzip
 import json
 from pathlib import Path
@@ -204,9 +205,29 @@ def test_kimi_k2_5_tiktoken_gz_conversion_matches_vendored_tokenizer_json(tmp_pa
     )
     assert converted_json is not None, "tiktoken_model_to_tokenizer_json returned None"
     converted_tok = Tokenizer.from_json_str(converted_json)
+    converted = json.loads(converted_json)
 
     # Also build a Tokenizer directly from the vendored tokenizer.json.
     vendored_tok = Tokenizer.from_json_str(vendored_json_path.read_text())
+
+    # Rough structural parity checks (order-insensitive).
+    converted_model = converted["model"]
+    vendored_model = vendored["model"]
+    assert converted_model["type"] == vendored_model["type"] == "BPE"
+    assert len(converted_model["vocab"]) == len(vendored_model["vocab"])
+    assert converted_model["vocab"] == vendored_model["vocab"]
+    assert len(converted_model["merges"]) == len(vendored_model["merges"])
+    assert Counter(tuple(m) for m in converted_model["merges"]) == Counter(
+        tuple(m) for m in vendored_model["merges"]
+    )
+
+    converted_special_tokens = {
+        t["content"]: t["id"] for t in converted["added_tokens"] if t.get("special")
+    }
+    vendored_special_tokens = {
+        t["content"]: t["id"] for t in vendored["added_tokens"] if t.get("special")
+    }
+    assert converted_special_tokens == vendored_special_tokens
 
     corpus = [
         "Hello, world!",
