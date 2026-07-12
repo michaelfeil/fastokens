@@ -156,6 +156,8 @@ struct TokenizerArtifacts {
     normalizer: Option<Normalizer>,
     pre_tokenizer: Option<PreTokenizer>,
     model: Model,
+    /// Kept in the immutable artifact cache as the construction baseline, but
+    /// cloned into each `Tokenizer` because callers can mutate it at runtime.
     post_processor: Option<PostProcessor>,
     decoder: Option<Decoder>,
     known_tokenizer: Option<known_tokenizers::KnownTokenizer>,
@@ -187,6 +189,7 @@ impl fmt::Display for TokenizerFingerprint {
 type TokenizerArtifactCache = Mutex<HashMap<TokenizerFingerprint, Arc<TokenizerArtifacts>>>;
 
 static TOKENIZER_ARTIFACT_CACHE: OnceLock<TokenizerArtifactCache> = OnceLock::new();
+const TOKENIZER_FINGERPRINT_VERSION: &str = "fastokens-tokenizer-v1";
 
 fn tokenizer_artifact_cache() -> &'static TokenizerArtifactCache {
     TOKENIZER_ARTIFACT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -197,7 +200,7 @@ fn semantic_fingerprint(json: &Value) -> TokenizerFingerprint {
     // Bump this version only when the semantic fields or canonical hashing
     // rules change. Existing in-process cache entries are intentionally
     // invalidated because the digest no longer represents the same identity.
-    hasher.write_str("fastokens-tokenizer-v1");
+    hasher.write_str(TOKENIZER_FINGERPRINT_VERSION);
     if let Value::Object(map) = json {
         for key in [
             "added_tokens",
