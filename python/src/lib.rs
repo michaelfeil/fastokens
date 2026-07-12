@@ -166,8 +166,8 @@ impl PyEncoding {
         let attention_mask_vec = std::mem::take(&mut self.attention_mask);
         let type_ids_vec = std::mem::take(&mut self.type_ids);
         let special_tokens_mask_vec = std::mem::take(&mut self.special_tokens_mask);
-        self._sequence_ids.clear();
-        self._word_ids.clear();
+        std::mem::take(&mut self._sequence_ids);
+        std::mem::take(&mut self._word_ids);
         self.n_sequences = 0;
 
         if ids {

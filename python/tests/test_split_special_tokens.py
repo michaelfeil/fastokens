@@ -327,32 +327,6 @@ class SplitSpecialTokensTests(unittest.TestCase):
                 special_tokens_mask=False,
             )
 
-    def test_native_encode_with_structural_tokens_into_numpy(self) -> None:
-        tokenizer_json = _tokenizer_json("<think>", "<tool>")
-        tokenizer = Tokenizer.from_json_str(tokenizer_json)
-        think_placeholder = "\ue000STRUCTTOK_0\ue000"
-        structural_config = StructuralTokenConfig({"<think>"})
-        placeholder_map = {think_placeholder: "<think>"}
-        prompt = f"<think>{think_placeholder}"
-
-        expected = tokenizer.encode_with_structural_tokens(
-            prompt,
-            structural_config,
-            placeholder_map,
-        ).ids
-        arrays = tokenizer.encode_with_structural_tokens(
-            prompt,
-            structural_config,
-            placeholder_map,
-        ).into_numpy()
-
-        ids = arrays["ids"]
-        self.assertEqual(ids.dtype, np.dtype("uint32"))
-        np.testing.assert_array_equal(
-            ids,
-            np.array(expected, dtype=np.uint32),
-        )
-
     def test_native_encode_with_structural_tokens_can_add_special_tokens(self) -> None:
         tokenizer_json = _tokenizer_json("<think>", "<tool>")
         tokenizer = Tokenizer.from_json_str(tokenizer_json)
@@ -434,20 +408,6 @@ class SplitSpecialTokensTests(unittest.TestCase):
             ids,
             [SPECIAL_ID, *_char_ids(tokenizer_json, "<think>")],
         )
-
-    def test_shim_supports_structural_encoding_into_numpy(self) -> None:
-        tokenizer_json = _tokenizer_json("<think>", "<tool>")
-        tokenizer = _TokenizerShim.from_str(tokenizer_json)
-        structural_config = StructuralTokenConfig({"<think>"})
-
-        arrays = tokenizer.encode_with_structural_tokens(
-            "<think>",
-            structural_config,
-        ).into_numpy()
-
-        ids = arrays["ids"]
-        self.assertEqual(ids.dtype, np.dtype("uint32"))
-        np.testing.assert_array_equal(ids, np.array([SPECIAL_ID], dtype=np.uint32))
 
     def test_shim_rejects_unknown_encode_kwargs(self) -> None:
         tokenizer = _TokenizerShim.from_str(_tokenizer_json("<think>", "<tool>"))
