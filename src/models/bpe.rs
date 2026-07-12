@@ -31,6 +31,19 @@ struct MergeMap {
 }
 
 const EMPTY_KEY: u64 = u64::MAX;
+const BYTE_TO_CHAR_REVERSE_LEN: usize = 324;
+const INVALID_BYTE: u16 = u16::MAX;
+const BYTE_TO_CHAR_REVERSE: [u16; BYTE_TO_CHAR_REVERSE_LEN] = build_byte_to_char_reverse();
+
+const fn build_byte_to_char_reverse() -> [u16; BYTE_TO_CHAR_REVERSE_LEN] {
+    let mut reverse = [INVALID_BYTE; BYTE_TO_CHAR_REVERSE_LEN];
+    let mut byte = 0usize;
+    while byte < 256 {
+        reverse[BYTE_TO_CHAR[byte] as usize] = byte as u16;
+        byte += 1;
+    }
+    reverse
+}
 
 impl MergeMap {
     fn new() -> Self {
@@ -1291,11 +1304,15 @@ impl PartialEq for Bpe {
 fn byte_level_token_to_raw(token: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(token.len());
     for ch in token.chars() {
-        let byte = BYTE_TO_CHAR
-            .iter()
-            .position(|&mapped| mapped == ch)
-            .and_then(|idx| u8::try_from(idx).ok())?;
-        bytes.push(byte);
+        let cp = ch as usize;
+        if cp >= BYTE_TO_CHAR_REVERSE.len() {
+            return None;
+        }
+        let byte = BYTE_TO_CHAR_REVERSE[cp];
+        if byte == INVALID_BYTE {
+            return None;
+        }
+        bytes.push(byte as u8);
     }
     String::from_utf8(bytes).ok()
 }
