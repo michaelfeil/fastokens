@@ -7,6 +7,9 @@ name = "fastokens-b10"
 dynamic = ["version"]
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+tiktoken = ["tiktoken>=0.13.0"]
+
 [tool.maturin]
 manifest-path = "python/Cargo.toml"
 python-source = "python"

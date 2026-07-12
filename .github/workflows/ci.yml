@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   test:
@@ -49,6 +50,9 @@ jobs:
       - name: Build and install wheel
         run: maturin build --release --out dist && pip install dist/*.whl
 
+      - name: Install Python test dependencies
+        run: pip install pytest tiktoken
+
       - name: Smoke test
         run: |
           python - <<'EOF'
@@ -60,6 +64,9 @@ jobs:
           assert decoded == "hello world", f"unexpected decode: {decoded!r}"
           print("smoke test passed")
           EOF
+
+      - name: Run Python tests
+        run: pytest python/tests -v
 
   patch-transformers:
     runs-on: ubuntu-latest
