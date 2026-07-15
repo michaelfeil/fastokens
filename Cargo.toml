@@ -18,6 +18,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+exclude = ["vendored_tokenizers/**"]
 
 [lib]
 name = "fastokens"
