@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Iterable, NamedTuple
 from urllib.parse import urlparse
 
 DEFAULT_TIKTOKEN_PATTERN = (
@@ -11,11 +12,25 @@ DEFAULT_TIKTOKEN_PATTERN = (
     r"\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|"
     r"\s+(?!\S)|\s+"
 )
+KIMI_TIKTOKEN_PATTERN = "|".join(
+    [
+        r"[\p{Han}]+",
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"\p{N}{1,3}",
+        r" ?[^\s\p{L}\p{N}]+[\r\n]*",
+        r"\s*[\r\n]+",
+        r"\s+(?!\S)",
+        r"\s+",
+    ]
+)
 PRINTABLE_ASCII_START = 33
 PRINTABLE_ASCII_END = 126
 LATIN1_DIRECT_START = 0xA1
 LATIN1_DIRECT_END_EXCLUSIVE = 0xAD
 LATIN1_DIRECT_RESUME = 0xAE
+
+logger = logging.getLogger(__name__)
 
 
 class _MergeCandidate(NamedTuple):
@@ -24,6 +39,16 @@ class _MergeCandidate(NamedTuple):
     right_rank: int
     left: bytes
     right: bytes
+
+
+class _AddedToken(NamedTuple):
+    id: int
+    content: str
+    single_word: bool = False
+    lstrip: bool = False
+    rstrip: bool = False
+    normalized: bool = False
+    special: bool = True
 
 
 def _byte_to_unicode() -> dict[int, str]:
@@ -104,14 +129,55 @@ def _extract_vocab_and_merges(mergeable_ranks: dict[bytes, int]) -> tuple[dict[s
     return vocab, merges
 
 
-def _normalise_special_tokens(special_tokens: Mapping[str, int] | None) -> dict[str, int]:
+def _normalise_special_tokens(special_tokens: Mapping[str, int] | None) -> list[_AddedToken]:
     if special_tokens is None:
-        return {}
-    return dict(special_tokens)
+        return []
+    return [
+        _AddedToken(id=token_id, content=token, special=True)
+        for token, token_id in sorted(dict(special_tokens).items(), key=lambda item: item[1])
+    ]
 
 
-def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
-    special_tokens: dict[str, int] = {}
+def _bool_config(value: Any, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _auto_tokenizer_entries(auto_tokenizer: Any) -> list[str]:
+    if isinstance(auto_tokenizer, str):
+        return [auto_tokenizer]
+    if isinstance(auto_tokenizer, list):
+        return [item for item in auto_tokenizer if isinstance(item, str)]
+    return []
+
+
+def _is_kimi_tiktoken_config(config: dict[str, Any]) -> bool:
+    auto_map = config.get("auto_map", {})
+    if isinstance(auto_map, dict):
+        if any("tokenization_kimi.TikTokenTokenizer" in item for item in _auto_tokenizer_entries(auto_map.get("AutoTokenizer"))):
+            return True
+    if config.get("tokenizer_class") != "TikTokenTokenizer":
+        return False
+    added_tokens_decoder = config.get("added_tokens_decoder", {})
+    if not isinstance(added_tokens_decoder, dict):
+        return False
+    kimi_markers = {
+        "<|im_user|>",
+        "<|im_assistant|>",
+        "<|im_middle|>",
+        "<|tool_calls_section_begin|>",
+    }
+    for token_config in added_tokens_decoder.values():
+        if isinstance(token_config, dict) and token_config.get("content") in kimi_markers:
+            return True
+    return False
+
+
+def _has_tokenizer_identity(config: dict[str, Any]) -> bool:
+    return "tokenizer_class" in config or "auto_map" in config
+
+
+def _config_added_tokens(config: dict[str, Any], base_vocab_size: int) -> list[_AddedToken]:
+    added_tokens: dict[int, _AddedToken] = {}
     added_tokens_decoder = config.get("added_tokens_decoder", {})
     if isinstance(added_tokens_decoder, dict):
         for token_id, token_config in added_tokens_decoder.items():
@@ -121,13 +187,37 @@ def _config_special_tokens(config: dict[str, Any]) -> dict[str, int]:
                 continue
             if isinstance(token_config, dict):
                 content = token_config.get("content")
-                is_special = token_config.get("special", False)
+                special = _bool_config(token_config.get("special"), False)
+                single_word = _bool_config(token_config.get("single_word"), False)
+                lstrip = _bool_config(token_config.get("lstrip"), False)
+                rstrip = _bool_config(token_config.get("rstrip"), False)
+                normalized = _bool_config(token_config.get("normalized"), False)
             else:
                 content = token_config
-                is_special = False
-            if isinstance(content, str) and is_special:
-                special_tokens[content] = token_id_int
-    return special_tokens
+                special = False
+                single_word = False
+                lstrip = False
+                rstrip = False
+                normalized = False
+            if isinstance(content, str):
+                added_tokens[token_id_int] = _AddedToken(
+                    id=token_id_int,
+                    content=content,
+                    single_word=single_word,
+                    lstrip=lstrip,
+                    rstrip=rstrip,
+                    normalized=normalized,
+                    special=special,
+                )
+
+    if _is_kimi_tiktoken_config(config) and added_tokens:
+        max_token_id = max(added_tokens)
+        for token_id in range(base_vocab_size, max_token_id + 1):
+            added_tokens.setdefault(
+                token_id,
+                _AddedToken(id=token_id, content=f"<|reserved_token_{token_id}|>", special=True),
+            )
+    return [added_tokens[token_id] for token_id in sorted(added_tokens)]
 
 
 def _load_model_config(model: str | Path) -> tuple[str, dict[str, Any]]:
@@ -144,22 +234,22 @@ def _load_model_config(model: str | Path) -> tuple[str, dict[str, Any]]:
 def _tokenizer_json_from_parts(
     mergeable_ranks: dict[bytes, int],
     pattern: str,
-    special_tokens: Mapping[str, int] | None,
+    added_tokens: Iterable[_AddedToken],
     *,
     pretty: bool = False,
 ) -> str:
     vocab, merges = _extract_vocab_and_merges(mergeable_ranks)
     added_tokens = [
         {
-            "id": token_id,
-            "content": token,
-            "single_word": False,
-            "lstrip": False,
-            "rstrip": False,
-            "normalized": False,
-            "special": True,
+            "id": token.id,
+            "content": token.content,
+            "single_word": token.single_word,
+            "lstrip": token.lstrip,
+            "rstrip": token.rstrip,
+            "normalized": token.normalized,
+            "special": token.special,
         }
-        for token, token_id in sorted(_normalise_special_tokens(special_tokens).items(), key=lambda item: item[1])
+        for token in added_tokens
     ]
 
     tokenizer_json = {
@@ -235,13 +325,30 @@ def tiktoken_model_to_tokenizer_json(
         config_pattern = config.get("pat_str")
         if not isinstance(config_pattern, str):
             config_pattern = config.get("pattern")
-        pattern = config_pattern if isinstance(config_pattern, str) else DEFAULT_TIKTOKEN_PATTERN
-    special_tokens = _config_special_tokens(config) if special_tokens is None else special_tokens
+        if isinstance(config_pattern, str):
+            pattern = config_pattern
+        elif _is_kimi_tiktoken_config(config):
+            pattern = KIMI_TIKTOKEN_PATTERN
+        elif _has_tokenizer_identity(config):
+            logger.warning(
+                "fastokens does not support converting tiktoken tokenizer config "
+                "%r: tokenizer_config.json does not define pat_str or pattern, "
+                "and the tokenizer type is unknown",
+                model_path,
+            )
+            return None
+        else:
+            pattern = DEFAULT_TIKTOKEN_PATTERN
     try:
         mergeable_ranks = load_tiktoken_bpe(model_path)
     except ValueError as exc:
         raise ValueError(f"invalid tiktoken model {model_path!r}: {exc}") from exc
-    return _tokenizer_json_from_parts(mergeable_ranks, pattern, special_tokens, pretty=pretty)
+    added_tokens = (
+        _config_added_tokens(config, len(mergeable_ranks))
+        if special_tokens is None
+        else _normalise_special_tokens(special_tokens)
+    )
+    return _tokenizer_json_from_parts(mergeable_ranks, pattern, added_tokens, pretty=pretty)
 
 
 def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | None:
@@ -266,4 +373,9 @@ def tiktoken_to_tokenizer_json(encoding: Any, *, pretty: bool = False) -> str | 
             "_mergeable_ranks, _pat_str, and _special_tokens"
         ) from exc
 
-    return _tokenizer_json_from_parts(mergeable_ranks, pattern, special_tokens, pretty=pretty)
+    return _tokenizer_json_from_parts(
+        mergeable_ranks,
+        pattern,
+        _normalise_special_tokens(special_tokens),
+        pretty=pretty,
+    )

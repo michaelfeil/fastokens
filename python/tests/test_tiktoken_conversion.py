@@ -3,7 +3,10 @@ import builtins
 from collections import Counter
 import gzip
 import json
+import logging
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -154,6 +157,186 @@ def test_tiktoken_model_to_tokenizer_json_reads_model_directory(tmp_path) -> Non
 
     assert tokenizer.encode("abcd", add_special_tokens=False).ids == [6]
     assert tokenizer.encode("<|end|>", add_special_tokens=False).ids == [100]
+
+
+def test_tiktoken_model_to_tokenizer_json_expands_sparse_kimi_added_tokens(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mergeable_ranks = {b"a": 0, b"b": 1, b"c": 2, b"d": 3}
+    tiktoken_module = types.ModuleType("tiktoken")
+    tiktoken_load_module = types.ModuleType("tiktoken.load")
+    tiktoken_load_module.load_tiktoken_bpe = lambda path: mergeable_ranks
+    tiktoken_module.load = tiktoken_load_module
+    monkeypatch.setitem(sys.modules, "tiktoken", tiktoken_module)
+    monkeypatch.setitem(sys.modules, "tiktoken.load", tiktoken_load_module)
+
+    (tmp_path / "tiktoken.model").write_text("")
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "TikTokenTokenizer",
+                "auto_map": {
+                    "AutoTokenizer": "tokenization_kimi.TikTokenTokenizer",
+                },
+                "added_tokens_decoder": {
+                    "6": {
+                        "content": "<|tool_call_begin|>",
+                        "special": False,
+                        "single_word": False,
+                        "lstrip": False,
+                        "rstrip": False,
+                        "normalized": False,
+                    },
+                    "8": {
+                        "content": "[PAD]",
+                        "special": True,
+                        "single_word": False,
+                        "lstrip": False,
+                        "rstrip": False,
+                        "normalized": False,
+                    },
+                },
+            }
+        )
+    )
+
+    tokenizer_json = tiktoken_model_to_tokenizer_json(tmp_path)
+    config = json.loads(tokenizer_json)
+    added = config["added_tokens"]
+
+    assert [token["id"] for token in added] == [4, 5, 6, 7, 8]
+    assert [token["content"] for token in added] == [
+        "<|reserved_token_4|>",
+        "<|reserved_token_5|>",
+        "<|tool_call_begin|>",
+        "<|reserved_token_7|>",
+        "[PAD]",
+    ]
+    assert [token["special"] for token in added] == [True, True, False, True, True]
+
+
+def test_kimi_k2_5_config_conversion_preserves_reserved_added_token_range(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = VENDORED_DIR / "kimi-k2.5" / "tokenizer_config.json"
+    if not config_path.exists():
+        pytest.skip("vendored kimi-k2.5 tokenizer_config.json not found")
+
+    class FakeMergeableRanks(dict):
+        def __len__(self) -> int:
+            return 163584
+
+    mergeable_ranks = FakeMergeableRanks({b"a": 0, b"b": 1, b"c": 2, b"d": 3})
+    tiktoken_module = types.ModuleType("tiktoken")
+    tiktoken_load_module = types.ModuleType("tiktoken.load")
+    tiktoken_load_module.load_tiktoken_bpe = lambda path: mergeable_ranks
+    tiktoken_module.load = tiktoken_load_module
+    monkeypatch.setitem(sys.modules, "tiktoken", tiktoken_module)
+    monkeypatch.setitem(sys.modules, "tiktoken.load", tiktoken_load_module)
+
+    (tmp_path / "tiktoken.model").write_text("")
+    (tmp_path / "tokenizer_config.json").write_text(config_path.read_text())
+
+    tokenizer_json = tiktoken_model_to_tokenizer_json(tmp_path)
+    config = json.loads(tokenizer_json)
+    added_by_id = {token["id"]: token for token in config["added_tokens"]}
+    vendored = json.loads((VENDORED_DIR / "kimi-k2.5" / "tokenizer.json").read_text())
+    vendored_pattern = vendored["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"]
+
+    assert list(added_by_id) == list(range(163584, 163840))
+    assert added_by_id[163589] == {
+        "id": 163589,
+        "content": "<|reserved_token_163589|>",
+        "single_word": False,
+        "lstrip": False,
+        "rstrip": False,
+        "normalized": False,
+        "special": True,
+    }
+    assert added_by_id[163595]["content"] == "<|tool_calls_section_begin|>"
+    assert added_by_id[163595]["special"] is False
+    assert added_by_id[163606]["content"] == "<think>"
+    assert added_by_id[163606]["special"] is False
+    assert added_by_id[163838]["content"] == "[UNK]"
+    assert added_by_id[163839]["content"] == "[PAD]"
+    assert config["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] == vendored_pattern
+
+
+def test_kimi_k2_5_conversion_encode_matches_hf_tokenizers(tmp_path) -> None:
+    pytest.importorskip("tiktoken")
+    hf_tokenizers = pytest.importorskip("tokenizers")
+
+    kimi_dir = VENDORED_DIR / "kimi-k2.5"
+    gz_path = kimi_dir / "tiktoken.model.gz"
+    config_path = kimi_dir / "tokenizer_config.json"
+    if not gz_path.exists() or not config_path.exists():
+        pytest.skip("vendored kimi-k2.5 assets not found")
+
+    model_path = tmp_path / "tiktoken.model"
+    model_path.write_bytes(gzip.decompress(gz_path.read_bytes()))
+    (tmp_path / "tokenizer_config.json").write_text(config_path.read_text())
+
+    tokenizer_json = tiktoken_model_to_tokenizer_json(tmp_path)
+    assert tokenizer_json is not None, "tiktoken_model_to_tokenizer_json returned None"
+
+    tokenizer_config = json.loads(tokenizer_json)
+    tokenizer_config.pop("decoder", None)
+    tokenizer_json = json.dumps(tokenizer_config, ensure_ascii=False)
+    fastokens_tok = Tokenizer.from_json_str(tokenizer_json)
+    hf_tok = hf_tokenizers.Tokenizer.from_str(tokenizer_json)
+
+    corpus = [
+        "[BOS]",
+        "<|im_user|>",
+        "<|tool_calls_section_begin|>",
+        "<think>",
+        "<|reserved_token_163589|>",
+        "<|im_user|>user<|im_middle|>Hello<|im_end|>",
+    ]
+    for text in corpus:
+        fastokens_ids = fastokens_tok.encode(text, add_special_tokens=False).ids
+        hf_ids = hf_tok.encode(text, add_special_tokens=False).ids
+        assert fastokens_ids == hf_ids, (
+            f"encoding mismatch for {text!r}:\n"
+            f"  fastokens : {fastokens_ids}\n"
+            f"  tokenizers: {hf_ids}"
+        )
+
+
+def test_tiktoken_model_to_tokenizer_json_rejects_unknown_patternless_config(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tiktoken_module = types.ModuleType("tiktoken")
+    tiktoken_load_module = types.ModuleType("tiktoken.load")
+    tiktoken_load_module.load_tiktoken_bpe = lambda path: {b"a": 0}
+    tiktoken_module.load = tiktoken_load_module
+    monkeypatch.setitem(sys.modules, "tiktoken", tiktoken_module)
+    monkeypatch.setitem(sys.modules, "tiktoken.load", tiktoken_load_module)
+
+    (tmp_path / "tiktoken.model").write_text("")
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "TikTokenTokenizer",
+                "auto_map": {
+                    "AutoTokenizer": [
+                        "tokenization_glm.TikTokenTokenizer",
+                        None,
+                    ],
+                },
+                "added_tokens_decoder": {},
+            }
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="fastokens.tiktoken"):
+        assert tiktoken_model_to_tokenizer_json(tmp_path) is None
+    assert "does not support converting tiktoken tokenizer config" in caplog.text
+    assert "does not define pat_str or pattern" in caplog.text
 
 
 def test_tiktoken_model_to_tokenizer_json_returns_none_without_optional_tiktoken(
