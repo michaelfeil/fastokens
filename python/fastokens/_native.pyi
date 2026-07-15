@@ -110,6 +110,9 @@ class Tokenizer:
     def vocab_size(self) -> int: ...
 
     @property
+    def fingerprint(self) -> str: ...
+
+    @property
     def truncation(self) -> Optional[dict]: ...
 
     @property

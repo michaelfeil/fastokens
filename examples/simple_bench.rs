@@ -383,11 +383,23 @@ fn main() -> Result<()> {
         eprintln!("Loaded {} samples", chunks.len());
         eprintln!("Fetching tokenizer for {}...", args.model);
     }
+    let t0 = Instant::now();
     let hf_tokenizer = tokenizers::Tokenizer::from_pretrained(&args.model, None)
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to load HF tokenizer")?;
+    let t1 = Instant::now();
     let tokenizer = fastokens::Tokenizer::from_model(&args.model)
         .context("failed to load fastokens tokenizer")?;
+    let t2 = Instant::now();
+    println!(
+        "Construction: hf={:.2} ms, fastokens={:.2} ms{}",
+        (t1 - t0).as_secs_f64() * 1000.0,
+        (t2 - t1).as_secs_f64() * 1000.0,
+        tokenizer
+            .known_tokenizer_name()
+            .map(|name| format!(" ({name} fast path)"))
+            .unwrap_or_default(),
+    );
 
     let mut csv_writer = args
         .output

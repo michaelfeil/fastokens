@@ -31,6 +31,19 @@ struct MergeMap {
 }
 
 const EMPTY_KEY: u64 = u64::MAX;
+const BYTE_TO_CHAR_REVERSE_LEN: usize = 324;
+const INVALID_BYTE: u16 = u16::MAX;
+const BYTE_TO_CHAR_REVERSE: [u16; BYTE_TO_CHAR_REVERSE_LEN] = build_byte_to_char_reverse();
+
+const fn build_byte_to_char_reverse() -> [u16; BYTE_TO_CHAR_REVERSE_LEN] {
+    let mut reverse = [INVALID_BYTE; BYTE_TO_CHAR_REVERSE_LEN];
+    let mut byte = 0usize;
+    while byte < 256 {
+        reverse[BYTE_TO_CHAR[byte] as usize] = byte as u16;
+        byte += 1;
+    }
+    reverse
+}
 
 impl MergeMap {
     fn new() -> Self {
@@ -589,6 +602,7 @@ pub struct Bpe {
     fused_shared_cache: SharedCache,
     id_to_token: Vec<String>,
     token_to_id: HashMap<String, u32>,
+    raw_token_to_id: HashMap<String, u32>,
     byte_to_initial_token: [u32; 256],
     ranked_merge_map: RankedMergeMap,
     byte_pair_initial: Vec<(u32, u32)>,
@@ -729,6 +743,18 @@ impl Bpe {
             }
         }
 
+        let raw_token_to_id = vocab_r
+            .iter()
+            .filter_map(|(&token, text)| {
+                if is_orphan[token as usize] {
+                    return None;
+                }
+                byte_level_token_to_raw(text).and_then(|raw| {
+                    raw_token_reaches_id(&raw, token, vocab, &merge_map).then_some((raw, token))
+                })
+            })
+            .collect();
+
         let daac = DoubleArrayAhoCorasickBuilder::new()
             .match_kind(daachorse::MatchKind::LeftmostLongest)
             .build_with_values(vocab_r.iter().filter_map(|(&token, pattern)| {
@@ -803,6 +829,7 @@ impl Bpe {
             fused_shared_cache: SharedCache::new(),
             id_to_token,
             token_to_id: vocab.clone(),
+            raw_token_to_id,
             byte_to_initial_token,
             ranked_merge_map,
             byte_pair_initial,
@@ -1099,6 +1126,11 @@ impl Bpe {
             return Ok(());
         }
 
+        if let Some(&token) = self.raw_token_to_id.get(raw_input) {
+            out.push(token);
+            return Ok(());
+        }
+
         let bpe_id = self.id;
         let hit = TL_FUSED_CACHE.with(|c| {
             let c = c.borrow();
@@ -1175,6 +1207,11 @@ impl Bpe {
                         continue;
                     }
 
+                    if let Some(&token) = self.raw_token_to_id.get(text) {
+                        out.push(token);
+                        continue;
+                    }
+
                     if cache.get(text, out) {
                         continue;
                     }
@@ -1235,6 +1272,7 @@ impl Clone for Bpe {
             fused_shared_cache: SharedCache::new(),
             id_to_token: self.id_to_token.clone(),
             token_to_id: self.token_to_id.clone(),
+            raw_token_to_id: self.raw_token_to_id.clone(),
             byte_to_initial_token: self.byte_to_initial_token,
             ranked_merge_map: self.ranked_merge_map.clone(),
             byte_pair_initial: self.byte_pair_initial.clone(),
@@ -1260,8 +1298,66 @@ impl PartialEq for Bpe {
             && self.unmerge_map == other.unmerge_map
             && self.next_prefix_map == other.next_prefix_map
             && self.token_lens == other.token_lens
+            && self.raw_token_to_id == other.raw_token_to_id
             && self.ignore_merges == other.ignore_merges
     }
+}
+
+fn byte_level_token_to_raw(token: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(token.len());
+    for ch in token.chars() {
+        let cp = ch as usize;
+        if cp >= BYTE_TO_CHAR_REVERSE.len() {
+            return None;
+        }
+        let byte = BYTE_TO_CHAR_REVERSE[cp];
+        if byte == INVALID_BYTE {
+            return None;
+        }
+        bytes.push(byte as u8);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn raw_token_reaches_id(
+    raw: &str,
+    expected_token: TokenId,
+    vocab: &Vocab,
+    merge_map: &ParsedMergeMap,
+) -> bool {
+    let mut tokens = Vec::with_capacity(raw.len());
+    for &byte in raw.as_bytes() {
+        let ch = BYTE_TO_CHAR[byte as usize];
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let Some(&id) = vocab.get(s) else {
+            return false;
+        };
+        tokens.push(id);
+    }
+
+    while tokens.len() > 1 {
+        let mut best_rank = u32::MAX;
+        let mut best_pos = usize::MAX;
+        let mut best_new = 0;
+        for i in 0..tokens.len() - 1 {
+            let pair = (tokens[i], tokens[i + 1]);
+            if let Some(&(rank, new_id)) = merge_map.get(&pair)
+                && rank < best_rank
+            {
+                best_rank = rank;
+                best_pos = i;
+                best_new = new_id;
+            }
+        }
+        if best_pos == usize::MAX {
+            break;
+        }
+        tokens[best_pos] = best_new;
+        tokens.remove(best_pos + 1);
+    }
+
+    tokens == [expected_token]
 }
 
 #[cfg(test)]
@@ -1370,5 +1466,90 @@ mod tests {
         let second = bpe.tokenize("ab").unwrap();
         assert_eq!(first, second);
         assert_eq!(first, vec![2]);
+    }
+
+    #[test]
+    fn byte_level_token_to_raw_decodes_visible_space() {
+        assert_eq!(byte_level_token_to_raw("Ġhello").as_deref(), Some(" hello"));
+        assert_eq!(byte_level_token_to_raw("Â¡").as_deref(), Some("¡"));
+        assert_eq!(byte_level_token_to_raw("¡"), None);
+    }
+
+    #[test]
+    fn fused_raw_exact_lookup_handles_byte_level_space() {
+        let vocab: Vocab = [
+            ("Ġ", 0),
+            ("h", 1),
+            ("e", 2),
+            ("l", 3),
+            ("o", 4),
+            ("Ġh", 5),
+            ("Ġhe", 6),
+            ("Ġhel", 7),
+            ("Ġhell", 8),
+            ("Ġhello", 9),
+        ]
+        .into_iter()
+        .map(|(s, id)| (s.to_string(), id))
+        .collect();
+        let merges = vec![
+            Value::String("Ġ h".into()),
+            Value::String("Ġh e".into()),
+            Value::String("Ġhe l".into()),
+            Value::String("Ġhel l".into()),
+            Value::String("Ġhell o".into()),
+        ];
+        let merge_map = parse_merges(&vocab, &merges).unwrap();
+        let bpe = Bpe::new(&vocab, merge_map).unwrap();
+
+        assert_eq!(bpe.raw_token_to_id.get(" hello"), Some(&9));
+
+        let mut ids = Vec::new();
+        bpe.tokenize_into_fused(" hello", &mut ids).unwrap();
+        assert_eq!(ids, vec![9]);
+
+        let mut batch_ids = Vec::new();
+        let buffer = " hello!".to_string();
+        let splits = vec![
+            crate::pre_tokenized::Split {
+                range: 0..6,
+                token_id: None,
+            },
+            crate::pre_tokenized::Split {
+                range: 6..7,
+                token_id: Some(99),
+            },
+        ];
+        bpe.tokenize_batch_fused(&buffer, &splits, &mut batch_ids)
+            .unwrap();
+        assert_eq!(batch_ids, vec![9, 99]);
+    }
+
+    #[test]
+    fn fused_raw_exact_lookup_skips_unreachable_byte_level_token() {
+        let vocab: Vocab = [
+            ("a", 0),
+            ("b", 1),
+            ("c", 2),
+            ("ab", 3),
+            ("bc", 4),
+            ("abc", 5),
+        ]
+        .into_iter()
+        .map(|(s, id)| (s.to_string(), id))
+        .collect();
+        let merges = vec![
+            Value::String("b c".into()),
+            Value::String("a b".into()),
+            Value::String("ab c".into()),
+        ];
+        let merge_map = parse_merges(&vocab, &merges).unwrap();
+        let bpe = Bpe::new(&vocab, merge_map).unwrap();
+
+        assert_eq!(bpe.raw_token_to_id.get("abc"), None);
+
+        let mut ids = Vec::new();
+        bpe.tokenize_into_fused("abc", &mut ids).unwrap();
+        assert_eq!(ids, vec![0, 4]);
     }
 }

@@ -24,8 +24,9 @@ exclude = ["vendored_tokenizers/**"]
 name = "fastokens"
 
 [features]
-default = ["hf-hub"]
+default = ["hf-hub", "known-tokenizer-aliases"]
 hf-hub = ["dep:hf-hub"]
+known-tokenizer-aliases = []
 
 [dependencies]
 daachorse = "1.0.0"

@@ -1,6 +1,7 @@
 pub mod added_tokens;
 pub mod decoders;
 pub mod json_structs;
+mod known_tokenizers;
 pub mod models;
 pub mod normalizers;
 pub mod post_processors;
@@ -9,8 +10,9 @@ pub mod pre_tokenizers;
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fmt, fs,
     path::Path,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder};
@@ -40,7 +42,8 @@ use self::{
 mod hf_hub_support {
     pub use hf_hub::api::sync::ApiError;
 
-    use super::{Error, Tokenizer, TokenizerJson};
+    use super::known_tokenizers;
+    use super::{Error, Tokenizer};
     use hf_hub::api::sync::{Api, ApiBuilder};
     use std::fs;
 
@@ -69,11 +72,9 @@ mod hf_hub_support {
     pub fn from_model_with_token(model: &str, token: Option<&str>) -> Result<Tokenizer, Error> {
         validate_model_id(model)?;
         let api = make_api(token)?;
-        let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        let raw = fs::read_to_string(json_path)?;
-        let json: TokenizerJson = serde_json::from_str(&raw)?;
-        Tokenizer::build(json)
+        let raw = download_or_factory_tokenizer_json(&api, model)?;
+        let json: serde_json::Value = serde_json::from_str(&raw)?;
+        Tokenizer::from_json(json)
     }
 
     /// Used by the Python layer to fetch `tokenizer.json` from the HuggingFace Hub and
@@ -81,9 +82,44 @@ mod hf_hub_support {
     pub fn download_tokenizer_json(model: &str) -> Result<String, Error> {
         validate_model_id(model)?;
         let api = make_api(None)?;
+        download_or_factory_tokenizer_json(&api, model)
+    }
+
+    fn download_or_factory_tokenizer_json(api: &Api, model: &str) -> Result<String, Error> {
+        // Prefer the vendored (compile-time embedded) JSON for known models so
+        // that callers never hit the network for tokenizer families whose assets
+        // are already bundled in the binary.
+        if let Some(raw) = known_tokenizers::vendored_tokenizer_json(model) {
+            return Ok(raw.to_string());
+        }
+
+        #[cfg(feature = "known-tokenizer-aliases")]
+        if let Some(canonical) = known_tokenizers::canonical_model_id(model)
+            && canonical != model
+        {
+            if let Some(raw) = known_tokenizers::vendored_tokenizer_json(canonical) {
+                return Ok(raw.to_string());
+            }
+        }
+
+        // Fall back to the HuggingFace Hub for models without a vendored copy.
         let repo = api.model(model.to_string());
-        let json_path = repo.get("tokenizer.json")?;
-        Ok(fs::read_to_string(json_path)?)
+        match repo.get("tokenizer.json") {
+            Ok(json_path) => Ok(fs::read_to_string(json_path)?),
+            Err(err) => {
+                #[cfg(feature = "known-tokenizer-aliases")]
+                if let Some(canonical) = known_tokenizers::canonical_model_id(model)
+                    && canonical != model
+                {
+                    let canonical_repo = api.model(canonical.to_string());
+                    if let Ok(json_path) = canonical_repo.get("tokenizer.json") {
+                        return Ok(fs::read_to_string(json_path)?);
+                    }
+                }
+
+                Err(err.into())
+            }
+        }
     }
 }
 
@@ -121,20 +157,161 @@ pub enum Error {
 
 /// An LLM tokenizer backed by `tokenizer.json`.
 pub struct Tokenizer {
+    artifacts: Arc<TokenizerArtifacts>,
+    post_processor: Option<PostProcessor>,
+}
+
+struct TokenizerArtifacts {
     added_tokens: Option<AddedTokens>,
     normalizer: Option<Normalizer>,
     pre_tokenizer: Option<PreTokenizer>,
     model: Model,
+    /// Kept in the immutable artifact cache as the construction baseline, but
+    /// cloned into each `Tokenizer` because callers can mutate it at runtime.
     post_processor: Option<PostProcessor>,
     decoder: Option<Decoder>,
+    known_tokenizer: Option<known_tokenizers::KnownTokenizer>,
+    fingerprint: TokenizerFingerprint,
     /// When the pre-tokenizer is `Sequence([Split, ByteLevel(bulk)])`,
     /// we store a Split-only pre-tokenizer and fuse ByteLevel into BPE.
     split_only: Option<PreTokenizer>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TokenizerFingerprint(u64);
+
+impl TokenizerFingerprint {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    pub fn to_hex(self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+impl fmt::Display for TokenizerFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+type TokenizerArtifactCache = Mutex<HashMap<TokenizerFingerprint, Arc<TokenizerArtifacts>>>;
+
+static TOKENIZER_ARTIFACT_CACHE: OnceLock<TokenizerArtifactCache> = OnceLock::new();
+const TOKENIZER_FINGERPRINT_VERSION: &str = "fastokens-tokenizer-v1";
+
+fn tokenizer_artifact_cache() -> &'static TokenizerArtifactCache {
+    TOKENIZER_ARTIFACT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn semantic_fingerprint(json: &Value) -> TokenizerFingerprint {
+    let mut hasher = StableHasher::new();
+    // Bump this version only when the semantic fields or canonical hashing
+    // rules change. Existing in-process cache entries are intentionally
+    // invalidated because the digest no longer represents the same identity.
+    hasher.write_str(TOKENIZER_FINGERPRINT_VERSION);
+    if let Value::Object(map) = json {
+        for key in [
+            "added_tokens",
+            "normalizer",
+            "pre_tokenizer",
+            "model",
+            "post_processor",
+            "decoder",
+        ] {
+            hasher.write_str(key);
+            hash_json_value(map.get(key).unwrap_or(&Value::Null), &mut hasher);
+        }
+    } else {
+        hash_json_value(json, &mut hasher);
+    }
+    TokenizerFingerprint(hasher.finish())
+}
+
+struct StableHasher(u64);
+
+impl StableHasher {
+    fn new() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+
+    fn write_byte(&mut self, byte: u8) {
+        self.0 ^= byte as u64;
+        self.0 = self.0.wrapping_mul(0x100000001b3);
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_byte(byte);
+        }
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write_usize(value.len());
+        self.write_bytes(value.as_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_bytes(&(value as u64).to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+fn hash_json_value(value: &Value, hasher: &mut StableHasher) {
+    match value {
+        Value::Null => hasher.write_byte(b'n'),
+        Value::Bool(value) => {
+            hasher.write_byte(b'b');
+            hasher.write_byte(u8::from(*value));
+        }
+        Value::Number(value) => {
+            hasher.write_byte(b'#');
+            hasher.write_str(&value.to_string());
+        }
+        Value::String(value) => {
+            hasher.write_byte(b's');
+            hasher.write_str(value);
+        }
+        Value::Array(values) => {
+            hasher.write_byte(b'[');
+            hasher.write_usize(values.len());
+            for value in values {
+                hash_json_value(value, hasher);
+            }
+        }
+        Value::Object(map) => {
+            hasher.write_byte(b'{');
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            hasher.write_usize(entries.len());
+            for (key, value) in entries {
+                hasher.write_str(key);
+                hash_json_value(value, hasher);
+            }
+        }
+    }
+}
+
 impl Tokenizer {
     /// Build the pipeline steps from a parsed JSON config.
-    fn build(json: TokenizerJson) -> Result<Self, Error> {
+    fn build(json: TokenizerJson, fingerprint: TokenizerFingerprint) -> Result<Self, Error> {
+        if let Some(artifacts) = tokenizer_artifact_cache()
+            .lock()
+            .unwrap()
+            .get(&fingerprint)
+            .cloned()
+        {
+            return Ok(Self {
+                post_processor: artifacts.post_processor.clone(),
+                artifacts,
+            });
+        }
+
+        let known_tokenizer = known_tokenizers::fingerprint(&json);
         let added_tokens = AddedTokens::from_configs(&json.added_tokens).map_err(Error::Model)?;
         let normalizer = json.normalizer.map(Normalizer::from_config).transpose()?;
         let pre_tokenizer = json
@@ -151,14 +328,26 @@ impl Tokenizer {
         // Detect Sequence([Split, ByteLevel(bulk)]) for fused byte-level+BPE.
         let split_only = Self::detect_fused_byte_level(&pre_tokenizer);
 
-        Ok(Self {
+        let artifacts = Arc::new(TokenizerArtifacts {
             added_tokens,
             normalizer,
             pre_tokenizer,
             model,
             post_processor,
             decoder,
+            known_tokenizer,
+            fingerprint,
             split_only,
+        });
+
+        tokenizer_artifact_cache()
+            .lock()
+            .unwrap()
+            .insert(fingerprint, Arc::clone(&artifacts));
+
+        Ok(Self {
+            post_processor: artifacts.post_processor.clone(),
+            artifacts,
         })
     }
 
@@ -182,14 +371,15 @@ impl Tokenizer {
 
     /// Create a tokenizer from a raw JSON value for `tokenizer.json`.
     pub fn from_json(json: Value) -> Result<Self, Error> {
+        let fingerprint = semantic_fingerprint(&json);
         let json: TokenizerJson = serde_json::from_value(json)?;
-        Self::build(json)
+        Self::build(json, fingerprint)
     }
 
     /// Create a tokenizer from a `tokenizer.json` file.
     pub fn from_file(path: &Path) -> Result<Self, Error> {
-        let json: TokenizerJson = serde_json::from_str(&fs::read_to_string(path)?)?;
-        Self::build(json)
+        let json: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        Self::from_json(json)
     }
 
     /// Download `tokenizer.json` from HuggingFace Hub for the given model (e.g.
@@ -221,12 +411,12 @@ impl Tokenizer {
 
     /// Return the normalizer, if any.
     pub fn normalizer(&self) -> Option<&Normalizer> {
-        self.normalizer.as_ref()
+        self.artifacts.normalizer.as_ref()
     }
 
     /// Return the pre-tokenizer, if any.
     pub fn pre_tokenizer(&self) -> Option<&PreTokenizer> {
-        self.pre_tokenizer.as_ref()
+        self.artifacts.pre_tokenizer.as_ref()
     }
 
     /// Return the post-processor, if any.
@@ -236,17 +426,32 @@ impl Tokenizer {
 
     /// Return the tokenization model.
     pub fn model(&self) -> &Model {
-        &self.model
+        &self.artifacts.model
     }
 
     /// Return the compiled added-token set, if any.
     pub fn added_tokens(&self) -> Option<&AddedTokens> {
-        self.added_tokens.as_ref()
+        self.artifacts.added_tokens.as_ref()
     }
 
     /// Return the decoder, if any.
     pub fn decoder(&self) -> Option<&Decoder> {
-        self.decoder.as_ref()
+        self.artifacts.decoder.as_ref()
+    }
+
+    /// Return the frozen-tokenizer fast-path family detected for this tokenizer.
+    pub fn known_tokenizer_name(&self) -> Option<&'static str> {
+        self.artifacts.known_tokenizer.map(|known| known.name())
+    }
+
+    /// Return the stable semantic fingerprint for the tokenizer behavior.
+    pub fn fingerprint(&self) -> TokenizerFingerprint {
+        self.artifacts.fingerprint
+    }
+
+    #[cfg(test)]
+    fn artifacts_ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.artifacts, &other.artifacts)
     }
 
     // ── Encoding ─────────────────────────────────────────────────────
@@ -293,24 +498,24 @@ impl Tokenizer {
         let mut pts = self.build_pre_tokenized_with_options(input, split_special_tokens);
 
         // Fused path: run only Split, then batch-tokenize with inline ByteLevel.
-        if let Some(ref split) = self.split_only {
+        if let Some(ref split) = self.artifacts.split_only {
             split.pre_tokenize(&mut pts)?;
             let ids = pts
                 .tokenize_batched(|buf, splits, out| {
-                    self.model.tokenize_batch_fused(buf, splits, out)
+                    self.artifacts.model.tokenize_batch_fused(buf, splits, out)
                 })
                 .map_err(Error::Model)?;
             return Ok(self.post_process(ids, add_special_tokens));
         }
 
         // 2. Pre-tokenize (refine splits in place).
-        if let Some(ref pt) = self.pre_tokenizer {
+        if let Some(ref pt) = self.artifacts.pre_tokenizer {
             pt.pre_tokenize(&mut pts)?;
         }
 
         // 3. Tokenize each text split with the model.
         let ids = pts
-            .tokenize(|text, out| self.model.tokenize_into(text, out))
+            .tokenize(|text, out| self.artifacts.model.tokenize_into(text, out))
             .map_err(Error::Model)?;
 
         // 4. Post-process.
@@ -480,7 +685,7 @@ impl Tokenizer {
         let mut tokens = Vec::with_capacity(ids.len());
         for &id in ids {
             if skip_special_tokens
-                && let Some(ref at) = self.added_tokens
+                && let Some(ref at) = self.artifacts.added_tokens
                 && at.is_special(id)
             {
                 continue;
@@ -494,7 +699,7 @@ impl Tokenizer {
             }
         }
 
-        match &self.decoder {
+        match &self.artifacts.decoder {
             Some(dec) => dec.decode(tokens).map_err(Error::Decoder),
             None => Ok(tokens.join("")),
         }
@@ -506,7 +711,7 @@ impl Tokenizer {
     /// without going through the ID→string lookup.  When no decoder is
     /// configured the tokens are concatenated with no separator.
     pub fn decode_tokens(&self, tokens: Vec<String>) -> Result<String, Error> {
-        match &self.decoder {
+        match &self.artifacts.decoder {
             Some(dec) => dec.decode(tokens).map_err(Error::Decoder),
             None => Ok(tokens.join("")),
         }
@@ -529,12 +734,12 @@ impl Tokenizer {
     /// Look up the string for a token ID, checking added tokens first,
     /// then the model vocabulary.
     pub fn id_to_token(&self, id: u32) -> Option<&str> {
-        if let Some(ref at) = self.added_tokens
+        if let Some(ref at) = self.artifacts.added_tokens
             && let Some(s) = at.id_to_token(id)
         {
             return Some(s);
         }
-        self.model.id_to_token(id)
+        self.artifacts.model.id_to_token(id)
     }
 
     /// Look up the token ID for a string.
@@ -542,24 +747,29 @@ impl Tokenizer {
     /// Added tokens are checked first (they shadow any BPE model entry with
     /// the same string), then the BPE model vocabulary.
     pub fn token_to_id(&self, token: &str) -> Option<u32> {
-        if let Some(ref at) = self.added_tokens
+        if let Some(ref at) = self.artifacts.added_tokens
             && let Some(id) = at.token_to_id(token)
         {
             return Some(id);
         }
-        self.model.token_to_id(token)
+        self.artifacts.model.token_to_id(token)
     }
 
     /// Return the vocabulary size (model tokens + added tokens).
     pub fn vocab_size(&self) -> usize {
-        let model_size = self.model.vocab_size();
-        let added_size = self.added_tokens.as_ref().map_or(0, |at| at.len());
+        let model_size = self.artifacts.model.vocab_size();
+        let added_size = self
+            .artifacts
+            .added_tokens
+            .as_ref()
+            .map_or(0, |at| at.len());
         model_size + added_size
     }
 
     /// Return whether this token ID is marked special in the added-token set.
     pub fn is_special_token(&self, id: u32) -> bool {
-        self.added_tokens
+        self.artifacts
+            .added_tokens
             .as_ref()
             .is_some_and(|added_tokens| added_tokens.is_special(id))
     }
@@ -578,7 +788,7 @@ impl Tokenizer {
         input: &str,
         split_special_tokens: bool,
     ) -> PreTokenizedString {
-        let segments = match &self.added_tokens {
+        let segments = match &self.artifacts.added_tokens {
             Some(at) if split_special_tokens => at.split_special_as_text(input),
             Some(at) => at.split(input),
             None => vec![Segment::Text(input)],
@@ -597,7 +807,7 @@ impl Tokenizer {
         if segments.len() == 1
             && let Segment::Text(text) = segments[0]
         {
-            let normalized = match &self.normalizer {
+            let normalized = match &self.artifacts.normalizer {
                 Some(n) => n.normalize(text),
                 None => std::borrow::Cow::Borrowed(text),
             };
@@ -632,7 +842,7 @@ impl Tokenizer {
                     if text.is_empty() {
                         continue;
                     }
-                    let normalized = match &self.normalizer {
+                    let normalized = match &self.artifacts.normalizer {
                         Some(n) => n.normalize(text),
                         None => std::borrow::Cow::Borrowed(*text),
                     };
@@ -864,6 +1074,84 @@ pub fn decode_stream_step(
         Ok(Some(new_text))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod local_tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn tiny_bpe_json() -> Value {
+        json!({
+            "version": "1.0",
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": "",
+                "end_of_word_suffix": "",
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {"a": 0, "b": 1, "ab": 2},
+                "merges": ["a b"]
+            }
+        })
+    }
+
+    #[test]
+    fn semantic_fingerprint_ignores_non_behavioral_top_level_metadata() {
+        let mut first = tiny_bpe_json();
+        let mut second = tiny_bpe_json();
+        first["model_name"] = json!("base/model");
+        first["extra_metadata"] = json!({"revision": "abc"});
+        second["model_name"] = json!("finetune/model");
+        second["extra_metadata"] = json!({"revision": "def"});
+
+        let first = Tokenizer::from_json(first).unwrap();
+        let second = Tokenizer::from_json(second).unwrap();
+
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert!(first.artifacts_ptr_eq(&second));
+    }
+
+    #[test]
+    fn semantic_fingerprint_changes_when_behavior_changes() {
+        let first = Tokenizer::from_json(tiny_bpe_json()).unwrap();
+        let mut changed = tiny_bpe_json();
+        changed["model"]["vocab"]["c"] = json!(3);
+
+        let changed = Tokenizer::from_json(changed).unwrap();
+
+        assert_ne!(first.fingerprint(), changed.fingerprint());
+        assert!(!first.artifacts_ptr_eq(&changed));
+    }
+
+    #[test]
+    fn family_fast_path_detection_uses_loaded_tokenizer_structure() {
+        let mut json = tiny_bpe_json();
+        json["pre_tokenizer"] = json!({
+            "type": "Sequence",
+            "pretokenizers": [
+                {
+                    "type": "Split",
+                    "pattern": {"Regex": crate::pre_tokenizers::QWEN3_SPLIT_PATTERN},
+                    "behavior": "Isolated",
+                    "invert": false
+                }
+            ]
+        });
+        json["model_name"] = json!("unlisted/finetune");
+
+        let tokenizer = Tokenizer::from_json(json).unwrap();
+
+        assert_eq!(tokenizer.known_tokenizer_name(), Some("qwen3"));
     }
 }
 
@@ -1649,7 +1937,10 @@ mod tests {
         let ours = Tokenizer::from_model(model).unwrap();
 
         // Verify the fused path is active.
-        assert!(ours.split_only.is_some(), "expected fused path for {model}",);
+        assert!(
+            ours.artifacts.split_only.is_some(),
+            "expected fused path for {model}",
+        );
 
         // Run the same input many times to stress the fused cache.
         let input = "The year 2024 was notable for advances in AI. Models like \

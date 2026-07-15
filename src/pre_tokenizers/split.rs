@@ -10,6 +10,9 @@ use crate::pre_tokenized::{PreTokenizedString, Split as PtSplit};
 
 use super::Error;
 
+/// Qwen-family pre-tokenization pattern used by Qwen3-style BPE tokenizers.
+pub(crate) const QWEN3_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
 // Thread-local cache of previous Split results for incremental re-use.
 thread_local! {
     static SPLIT_CACHE: RefCell<SplitCache> = RefCell::new(SplitCache::default());
@@ -147,12 +150,19 @@ pub struct Split {
     /// "primary" used for sequential matching; the rest are independent
     /// copies (each with its own DFA cache) used by parallel threads.
     regexes: Vec<Regex>,
+    source: String,
     behavior: SplitBehavior,
     invert: bool,
+    specialized: Option<SpecializedSplit>,
     /// PCRE2 JIT-compiled regex copies for parallel matching (one per thread).
     /// Compiled opportunistically for all patterns; `None` only if PCRE2
     /// cannot handle the pattern syntax.
     pcre2_regexes: Option<Vec<Pcre2Regex>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpecializedSplit {
+    Qwen3,
 }
 
 /// Compile PCRE2 JIT regexes from `source`, returning `None` if PCRE2 cannot
@@ -183,6 +193,14 @@ fn compile_regexes(source: &str, n: usize) -> Result<Vec<Regex>, Error> {
     Ok(regexes)
 }
 
+fn detect_specialized_split(source: &str) -> Option<SpecializedSplit> {
+    if source == QWEN3_SPLIT_PATTERN {
+        Some(SpecializedSplit::Qwen3)
+    } else {
+        None
+    }
+}
+
 impl TryFrom<SplitRaw> for Split {
     type Error = Error;
 
@@ -190,11 +208,14 @@ impl TryFrom<SplitRaw> for Split {
         let source = raw.pattern.source();
         let pcre2_regexes = try_compile_pcre2_regexes(&source, max_parallel());
         let regexes = compile_regexes(&source, max_parallel())?;
+        let specialized = detect_specialized_split(&source);
         Ok(Self {
             id: SPLIT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             regexes,
+            source,
             behavior: raw.behavior,
             invert: raw.invert,
+            specialized,
             pcre2_regexes,
         })
     }
@@ -211,13 +232,20 @@ impl Split {
         let regexes = compile_regexes(&source, max_parallel())?;
         let behavior: SplitBehavior = serde_json::from_value(Value::String(behavior.to_string()))?;
         let pcre2_regexes = try_compile_pcre2_regexes(&source, max_parallel());
+        let specialized = detect_specialized_split(&source);
         Ok(Self {
             id: SPLIT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             regexes,
+            source,
             behavior,
             invert,
+            specialized,
             pcre2_regexes,
         })
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
     }
 
     /// Refine the splits of a [`PreTokenizedString`] in place.
@@ -226,6 +254,18 @@ impl Split {
     /// zero-copy: the buffer stays unchanged and only the split ranges are
     /// replaced.
     pub fn pre_tokenize(&self, pts: &mut PreTokenizedString) -> Result<(), Error> {
+        // Fast path: known tokenizer pattern + Isolated + !invert + single text
+        // split. This skips regex matching entirely for high-volume models.
+        if self.specialized.is_some()
+            && self.behavior == SplitBehavior::Isolated
+            && !self.invert
+            && pts.splits().len() == 1
+            && pts.splits()[0].token_id.is_none()
+            && pts.split_text(&pts.splits()[0]).is_ascii()
+        {
+            return self.pre_tokenize_specialized_isolated(pts);
+        }
+
         // Fast path: PCRE2 JIT + Isolated + !invert + single text split.
         // Every match and gap becomes its own split, so we can skip the
         // segments/behavior abstraction entirely. Only applies when the PTS
@@ -266,6 +306,41 @@ impl Split {
                     });
                 }
             }
+        }
+
+        pts.refine_splits(new_splits);
+        Ok(())
+    }
+
+    fn pre_tokenize_specialized_isolated(&self, pts: &mut PreTokenizedString) -> Result<(), Error> {
+        let buffer = pts.buffer();
+        let split = &pts.splits()[0];
+        let base = split.range.start;
+        let text = &buffer[split.range.clone()];
+        let matches = self
+            .find_matches_specialized(text, base)
+            .expect("specialized split should not return None for ASCII fast-path input");
+
+        let mut new_splits = Vec::with_capacity(matches.len() * 2);
+        let mut prev = base;
+        for (s, e) in matches {
+            if s > prev {
+                new_splits.push(PtSplit {
+                    range: prev..s,
+                    token_id: None,
+                });
+            }
+            new_splits.push(PtSplit {
+                range: s..e,
+                token_id: None,
+            });
+            prev = e;
+        }
+        if prev < base + text.len() {
+            new_splits.push(PtSplit {
+                range: prev..(base + text.len()),
+                token_id: None,
+            });
         }
 
         pts.refine_splits(new_splits);
@@ -469,6 +544,10 @@ impl Split {
     /// Phase 1: find all regex matches and build an interleaved list of
     /// `(start, end, is_match)` segments.
     fn find_segments(&self, input: &str) -> Result<Vec<(usize, usize, bool)>, Error> {
+        if let Some(matches) = self.find_matches_specialized(input, 0) {
+            return Ok(matches_to_segments(&matches, input.len(), self.invert));
+        }
+
         // Prefer PCRE2 JIT when available.
         if let Some(pcre2) = &self.pcre2_regexes {
             let matches = if input.len() >= MIN_CHUNK_SIZE * 2 && pcre2.len() >= 2 {
@@ -486,6 +565,13 @@ impl Split {
             return Ok(matches_to_segments(&matches, input.len(), self.invert));
         }
         self.find_segments_seq(input)
+    }
+
+    fn find_matches_specialized(&self, input: &str, base: usize) -> Option<Vec<(usize, usize)>> {
+        match self.specialized? {
+            SpecializedSplit::Qwen3 if input.is_ascii() => Some(find_matches_qwen3(input, base)),
+            SpecializedSplit::Qwen3 => None,
+        }
     }
 
     /// Sequential regex matching (fancy_regex fallback).
@@ -847,6 +933,162 @@ fn find_matches_pcre2(
     Ok(matches)
 }
 
+fn find_matches_qwen3(input: &str, base: usize) -> Vec<(usize, usize)> {
+    // Qwen's pattern usually emits short pieces (words, single digits,
+    // punctuation runs), so one match per ~3 input bytes is a practical initial
+    // capacity without over-allocating heavily for long prompts.
+    let mut matches = Vec::with_capacity(input.len() / 3);
+    let mut pos = 0;
+    while pos < input.len() {
+        let end = qwen3_match_end(input, pos).unwrap_or_else(|| next_char_end(input, pos));
+        if end > pos {
+            matches.push((base + pos, base + end));
+        }
+        pos = end;
+    }
+    matches
+}
+
+fn qwen3_match_end(input: &str, pos: usize) -> Option<usize> {
+    if let Some(len) = qwen3_contraction_len(&input[pos..]) {
+        return Some(pos + len);
+    }
+
+    let (ch, next) = char_at(input, pos)?;
+
+    if is_letter(ch) {
+        return Some(consume_while(input, pos, is_letter));
+    }
+    if !is_newline(ch)
+        && !is_letter(ch)
+        && !is_number(ch)
+        && next < input.len()
+        && let Some((next_ch, _)) = char_at(input, next)
+        && is_letter(next_ch)
+    {
+        return Some(consume_while(input, next, is_letter));
+    }
+
+    if is_number(ch) {
+        return Some(next);
+    }
+
+    if ch == ' '
+        && next < input.len()
+        && let Some((next_ch, _)) = char_at(input, next)
+        && is_punct_for_qwen3(next_ch)
+    {
+        return Some(consume_qwen3_punct_then_newlines(input, next));
+    }
+    if is_punct_for_qwen3(ch) {
+        return Some(consume_qwen3_punct_then_newlines(input, pos));
+    }
+
+    if ch.is_whitespace() {
+        if let Some(end) = consume_whitespace_through_last_newline(input, pos) {
+            return Some(end);
+        }
+        let end = consume_while(input, pos, char::is_whitespace);
+        // Emulate `\s+(?!\S)`: for a multi-space run before a visible
+        // character, the regex backs off and leaves the final whitespace byte
+        // for the following optional-prefix branch.
+        if end < input.len() && end - pos > 1 {
+            return Some(end - 1);
+        }
+        return Some(end);
+    }
+
+    None
+}
+
+fn qwen3_contraction_len(input: &str) -> Option<usize> {
+    const CONTRACTIONS: &[&str] = &["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"];
+    CONTRACTIONS
+        .iter()
+        .copied()
+        .find(|pat| starts_with_ignore_ascii_case(input.as_bytes(), pat.as_bytes()))
+        .map(str::len)
+}
+
+fn starts_with_ignore_ascii_case(input: &[u8], prefix: &[u8]) -> bool {
+    input.len() >= prefix.len()
+        && input[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+fn char_at(input: &str, pos: usize) -> Option<(char, usize)> {
+    let ch = input[pos..].chars().next()?;
+    Some((ch, pos + ch.len_utf8()))
+}
+
+fn next_char_end(input: &str, pos: usize) -> usize {
+    char_at(input, pos).map_or(input.len(), |(_, next)| next)
+}
+
+fn consume_while(input: &str, pos: usize, predicate: impl Fn(char) -> bool) -> usize {
+    let mut end = pos;
+    while end < input.len() {
+        let Some((ch, next)) = char_at(input, end) else {
+            break;
+        };
+        if !predicate(ch) {
+            break;
+        }
+        end = next;
+    }
+    end
+}
+
+fn consume_qwen3_punct_then_newlines(input: &str, pos: usize) -> usize {
+    let mut end = consume_while(input, pos, is_punct_for_qwen3);
+    while end < input.len() {
+        let Some((ch, next)) = char_at(input, end) else {
+            break;
+        };
+        if !is_newline(ch) {
+            break;
+        }
+        end = next;
+    }
+    end
+}
+
+fn consume_whitespace_through_last_newline(input: &str, pos: usize) -> Option<usize> {
+    let mut end = pos;
+    let mut last_newline_end = None;
+    while end < input.len() {
+        let Some((ch, next)) = char_at(input, end) else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        if is_newline(ch) {
+            last_newline_end = Some(next);
+        }
+        end = next;
+    }
+    last_newline_end
+}
+
+fn is_letter(ch: char) -> bool {
+    ch.is_alphabetic()
+}
+
+fn is_number(ch: char) -> bool {
+    ch.is_numeric()
+}
+
+fn is_newline(ch: char) -> bool {
+    matches!(ch, '\r' | '\n')
+}
+
+fn is_punct_for_qwen3(ch: char) -> bool {
+    !ch.is_whitespace() && !is_letter(ch) && !is_number(ch)
+}
+
 /// Round a byte offset up to the nearest UTF-8 char boundary.
 fn snap_char_ceil(s: &str, pos: usize) -> usize {
     let mut p = pos;
@@ -907,6 +1149,46 @@ mod tests {
             s.split("the-final--countdown").unwrap(),
             vec!["the", "-", "final", "--", "countdown"],
         );
+    }
+
+    #[test]
+    fn qwen3_specialized_split_matches_regex_on_ascii() {
+        let regex = Regex::new(QWEN3_SPLIT_PATTERN).unwrap();
+        let inputs = [
+            "",
+            "Hello, world!",
+            "I'M sure you're testing contractions.",
+            "abc123def456",
+            "  leading and trailing  ",
+            "line\none\r\ntwo",
+            "code: fn main() { println!(\"hi\"); }",
+            "symbols !!! ??? ###\n\nnext",
+            "tabs\tand spaces \n done",
+            "'quoted' .prefixed /path/to/file",
+        ];
+
+        for input in inputs {
+            let expected: Vec<&str> = regex
+                .find_iter(input)
+                .map(|m| {
+                    let m = m.unwrap();
+                    &input[m.start()..m.end()]
+                })
+                .collect();
+            let actual: Vec<&str> = find_matches_qwen3(input, 0)
+                .into_iter()
+                .map(|(s, e)| &input[s..e])
+                .collect();
+            assert_eq!(actual, expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn qwen3_split_falls_back_for_non_ascii() {
+        let s =
+            Split::from_config(&json!({"Regex": QWEN3_SPLIT_PATTERN}), "Isolated", false).unwrap();
+        assert!(s.find_matches_specialized("hello", 0).is_some());
+        assert!(s.find_matches_specialized("café", 0).is_none());
     }
 
     // ── Invert tests ────────────────────────────────────
