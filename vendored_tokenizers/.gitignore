@@ -1,0 +1,11 @@
+# Private segmented tiktoken assets used for local parity testing.
+*/__pycache__/
+*/config.json
+*/configuration_*.py
+*/encoding_*.py
+*/generation_config.json
+*/preprocessor_config.json
+*/tiktoken.model
+*/tokenization_*.py
+*/tokenizer.json
+*/tokenizer_config.json
