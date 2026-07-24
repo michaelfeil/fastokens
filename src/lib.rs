@@ -782,34 +782,34 @@ fn tiktoken_safe_chunks(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return Vec::new();
     }
+    if text.is_ascii() {
+        return tiktoken_safe_chunks_ascii(text);
+    }
 
     let mut chunks = Vec::new();
-    let mut outer_start = 0;
-    let mut outer_chars = 0;
-    for (idx, _) in text.char_indices() {
-        if outer_chars == TIKTOKEN_MAX_ENCODE_CHARS {
-            push_whitespace_limited_chunks(&text[outer_start..idx], &mut chunks);
-            outer_start = idx;
-            outer_chars = 0;
-        }
-        outer_chars += 1;
-    }
-    push_whitespace_limited_chunks(&text[outer_start..], &mut chunks);
-    chunks
-}
-
-fn push_whitespace_limited_chunks<'a>(text: &'a str, chunks: &mut Vec<&'a str>) {
-    if text.is_empty() {
-        return;
-    }
-
     let mut slice_start = 0;
+    let mut outer_chars = 0;
     let mut current_slice_len = 0;
-    let mut current_slice_is_space = text.chars().next().is_some_and(char::is_whitespace);
+    let mut current_slice_is_space = false;
+    let mut have_run = false;
 
     for (idx, char) in text.char_indices() {
+        if outer_chars == TIKTOKEN_MAX_ENCODE_CHARS {
+            if slice_start < idx {
+                chunks.push(&text[slice_start..idx]);
+            }
+            slice_start = idx;
+            outer_chars = 0;
+            current_slice_len = 0;
+            have_run = false;
+        }
+
         let is_now_space = char.is_whitespace();
-        if current_slice_is_space ^ is_now_space {
+        if !have_run {
+            current_slice_len = 1;
+            current_slice_is_space = is_now_space;
+            have_run = true;
+        } else if current_slice_is_space ^ is_now_space {
             current_slice_len = 1;
             current_slice_is_space = is_now_space;
         } else {
@@ -822,11 +822,64 @@ fn push_whitespace_limited_chunks<'a>(text: &'a str, chunks: &mut Vec<&'a str>) 
                 current_slice_len = 1;
             }
         }
+        outer_chars += 1;
+    }
+    if slice_start < text.len() {
+        chunks.push(&text[slice_start..]);
+    }
+    chunks
+}
+
+fn tiktoken_safe_chunks_ascii(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut chunks = Vec::new();
+    let mut slice_start = 0;
+    let mut outer_chars = 0;
+    let mut current_slice_len = 0;
+    let mut current_slice_is_space = false;
+    let mut have_run = false;
+
+    for (idx, &byte) in bytes.iter().enumerate() {
+        if outer_chars == TIKTOKEN_MAX_ENCODE_CHARS {
+            if slice_start < idx {
+                chunks.push(&text[slice_start..idx]);
+            }
+            slice_start = idx;
+            outer_chars = 0;
+            current_slice_len = 0;
+            have_run = false;
+        }
+
+        let is_now_space = is_ascii_whitespace(byte);
+        if !have_run {
+            current_slice_len = 1;
+            current_slice_is_space = is_now_space;
+            have_run = true;
+        } else if current_slice_is_space ^ is_now_space {
+            current_slice_len = 1;
+            current_slice_is_space = is_now_space;
+        } else {
+            current_slice_len += 1;
+            if current_slice_len > TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS {
+                if slice_start < idx {
+                    chunks.push(&text[slice_start..idx]);
+                }
+                slice_start = idx;
+                current_slice_len = 1;
+            }
+        }
+        outer_chars += 1;
     }
 
     if slice_start < text.len() {
         chunks.push(&text[slice_start..]);
     }
+    chunks
+}
+
+#[inline]
+fn is_ascii_whitespace(byte: u8) -> bool {
+    byte == b' ' || byte.wrapping_sub(b'\t') < 5
 }
 
 struct MatchedPart<'a> {
@@ -1721,6 +1774,76 @@ mod tests {
             !ids.contains(&102),
             "literal <tool> must not become added token"
         );
+    }
+
+    #[test]
+    fn tiktoken_safe_chunks_match_legacy_two_pass_chunking() {
+        fn legacy_chunks(text: &str) -> Vec<&str> {
+            fn push_run_limited<'a>(text: &'a str, chunks: &mut Vec<&'a str>) {
+                if text.is_empty() {
+                    return;
+                }
+
+                let mut slice_start = 0;
+                let mut current_slice_len = 0;
+                let mut current_slice_is_space =
+                    text.chars().next().is_some_and(char::is_whitespace);
+
+                for (idx, char) in text.char_indices() {
+                    let is_now_space = char.is_whitespace();
+                    if current_slice_is_space ^ is_now_space {
+                        current_slice_len = 1;
+                        current_slice_is_space = is_now_space;
+                    } else {
+                        current_slice_len += 1;
+                        if current_slice_len
+                            > TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS
+                        {
+                            if slice_start < idx {
+                                chunks.push(&text[slice_start..idx]);
+                            }
+                            slice_start = idx;
+                            current_slice_len = 1;
+                        }
+                    }
+                }
+
+                if slice_start < text.len() {
+                    chunks.push(&text[slice_start..]);
+                }
+            }
+
+            let mut chunks = Vec::new();
+            let mut outer_start = 0;
+            let mut outer_chars = 0;
+            for (idx, _) in text.char_indices() {
+                if outer_chars == TIKTOKEN_MAX_ENCODE_CHARS {
+                    push_run_limited(&text[outer_start..idx], &mut chunks);
+                    outer_start = idx;
+                    outer_chars = 0;
+                }
+                outer_chars += 1;
+            }
+            push_run_limited(&text[outer_start..], &mut chunks);
+            chunks
+        }
+
+        let cases = [
+            "hello world".to_string(),
+            "a".repeat(TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS + 7),
+            " ".repeat(TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS + 7),
+            format!(
+                "{} {}",
+                "a".repeat(TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS),
+                "b".repeat(16),
+            ),
+            "abc ".repeat((TIKTOKEN_MAX_ENCODE_CHARS / 4) + 3),
+            "東京 abc مرحبا ".repeat(40_000),
+        ];
+
+        for case in &cases {
+            assert_eq!(tiktoken_safe_chunks(case), legacy_chunks(case));
+        }
     }
 
     #[test]

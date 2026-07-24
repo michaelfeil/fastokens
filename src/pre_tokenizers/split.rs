@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -155,19 +156,37 @@ pub struct Split {
     pcre2_regexes: Option<Vec<Pcre2Regex>>,
 }
 
+const KIMI_REGEX_SOURCE: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+const KIMI_PCRE2_REGEX_SOURCE: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?(?:(?!\p{Han})[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}])*(?:(?!\p{Han})[\p{Ll}\p{Lm}\p{Lo}\p{M}])+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?(?:(?!\p{Han})[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}])+(?:(?!\p{Han})[\p{Ll}\p{Lm}\p{Lo}\p{M}])*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+fn pcre2_source(source: &str) -> Option<Cow<'_, str>> {
+    if !source.contains("&&") {
+        return Some(Cow::Borrowed(source));
+    }
+
+    // The Kimi tokenizer JSON uses regex-syntax class intersections (`&&`),
+    // which PCRE2 does not parse. This equivalent spelling preserves the same
+    // "letter/mark but not Han" character classes with a per-codepoint
+    // negative lookahead, letting the Kimi family use the PCRE2/JIT path.
+    if source == KIMI_REGEX_SOURCE {
+        return Some(Cow::Borrowed(KIMI_PCRE2_REGEX_SOURCE));
+    }
+
+    None
+}
+
 /// Compile PCRE2 JIT regexes from `source`, returning `None` if PCRE2 cannot
 /// handle the pattern (e.g. unsupported syntax).
 fn try_compile_pcre2_regexes(source: &str, n: usize) -> Option<Vec<Pcre2Regex>> {
-    if source.contains("&&") {
-        return None;
-    }
+    let source = pcre2_source(source)?;
     let mut regexes = Vec::with_capacity(n);
     for _ in 0..n {
         let re = pcre2::bytes::RegexBuilder::new()
             .utf(true)
             .ucp(true)
             .jit_if_available(true)
-            .build(source)
+            .build(source.as_ref())
             .ok()?;
         regexes.push(Pcre2Regex(re));
     }
@@ -1453,6 +1472,54 @@ mod tests {
             "should be exactly one 'a' piece, got {a_pieces:?}"
         );
         assert_eq!(&input[match_start..match_end], *long_piece,);
+    }
+
+    #[test]
+    fn kimi_regex_uses_pcre2_equivalent_with_fancy_regex_parity() {
+        let split =
+            Split::from_config(&json!({"Regex": KIMI_REGEX_SOURCE}), "Isolated", false).unwrap();
+        assert!(
+            split.pcre2_regexes.is_some(),
+            "Kimi pattern should compile through the PCRE2 compatibility path"
+        );
+
+        let reference = Regex::new(KIMI_REGEX_SOURCE).unwrap();
+        let long_agent_trace = "Agent trace entry: ".repeat(10_000);
+        let cases = [
+            "hello world",
+            "please explain the literal token <|open|> <|sep|> <|close|>",
+            "東京 and Seoul with München, Sao Paulo, مرحبا.",
+            "中文English文 ABC中文 中文ABC",
+            "JSON: {\"type\":\"object\",\"required\":[\"city\"]}\n",
+            "path/to/file and http://example.com/path",
+            "can't we'll they're Kimi's",
+            "1234567890 １２３ Ⅷ ½",
+            "  trailing spaces   ",
+            "\n\n  next line",
+            "中\r\n文 !\n/x",
+            long_agent_trace.as_str(),
+        ];
+
+        for input in cases {
+            let mut expected = Vec::new();
+            let mut prev_end = 0;
+            for m in reference.find_iter(input) {
+                let m = m.unwrap();
+                if m.start() > prev_end {
+                    expected.push(&input[prev_end..m.start()]);
+                }
+                if m.start() < m.end() {
+                    expected.push(&input[m.start()..m.end()]);
+                }
+                prev_end = m.end();
+            }
+            if prev_end < input.len() {
+                expected.push(&input[prev_end..]);
+            }
+
+            let actual = split.split(input).unwrap();
+            assert_eq!(actual, expected, "Kimi PCRE2 parity failed on {input:?}");
+        }
     }
 
     // ── Incremental cache: lookahead at divergence boundary ──

@@ -154,6 +154,8 @@ struct CacheSlot {
     len: u16,
     key_len: u16,
     key_offset: u32,
+    inline0: u32,
+    inline1: u32,
 }
 
 /// Maximum load factor before the cache is cleared.
@@ -178,6 +180,8 @@ impl FlatCache {
                     len: 0,
                     key_len: 0,
                     key_offset: 0,
+                    inline0: 0,
+                    inline1: 0,
                 };
                 FLAT_CACHE_SIZE
             ],
@@ -229,9 +233,19 @@ impl FlatCache {
                 let ks = slot.key_offset as usize;
                 let ke = ks + slot.key_len as usize;
                 if unsafe { self.key_pool.get_unchecked(ks..ke) } == key_bytes {
-                    let start = slot.offset as usize;
-                    let end = start + slot.len as usize;
-                    out.extend_from_slice(unsafe { self.pool.get_unchecked(start..end) });
+                    match slot.len {
+                        0 => {}
+                        1 => out.push(slot.inline0),
+                        2 => {
+                            out.push(slot.inline0);
+                            out.push(slot.inline1);
+                        }
+                        len => {
+                            let start = slot.offset as usize;
+                            let end = start + len as usize;
+                            out.extend_from_slice(unsafe { self.pool.get_unchecked(start..end) });
+                        }
+                    }
                     return true;
                 }
             }
@@ -261,8 +275,13 @@ impl FlatCache {
                     return;
                 };
                 self.count += 1;
-                let offset = self.pool.len() as u32;
-                self.pool.extend_from_slice(ids);
+                let offset = if ids.len() <= 2 {
+                    0
+                } else {
+                    let offset = self.pool.len() as u32;
+                    self.pool.extend_from_slice(ids);
+                    offset
+                };
                 let key_offset = self.key_pool.len() as u32;
                 self.key_pool.extend_from_slice(key_bytes);
                 let slot = unsafe { self.slots.get_unchecked_mut(idx) };
@@ -271,6 +290,8 @@ impl FlatCache {
                 slot.len = len;
                 slot.key_offset = key_offset;
                 slot.key_len = key_len;
+                slot.inline0 = ids.first().copied().unwrap_or(0);
+                slot.inline1 = ids.get(1).copied().unwrap_or(0);
                 return;
             }
             if h == hash {
@@ -280,11 +301,18 @@ impl FlatCache {
                     let Ok(len) = u16::try_from(ids.len()) else {
                         return;
                     };
-                    let offset = self.pool.len() as u32;
-                    self.pool.extend_from_slice(ids);
+                    let offset = if ids.len() <= 2 {
+                        0
+                    } else {
+                        let offset = self.pool.len() as u32;
+                        self.pool.extend_from_slice(ids);
+                        offset
+                    };
                     let slot = unsafe { self.slots.get_unchecked_mut(idx) };
                     slot.offset = offset;
                     slot.len = len;
+                    slot.inline0 = ids.first().copied().unwrap_or(0);
+                    slot.inline1 = ids.get(1).copied().unwrap_or(0);
                     return;
                 }
             }
