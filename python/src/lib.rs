@@ -812,6 +812,10 @@ impl PyTokenizer {
     /// Each segment is ``(text, allow_special)``. When ``allow_special`` is
     /// false, all added-token matching is bypassed for that segment, matching
     /// ``tiktoken.encode(..., disallowed_special=())`` for user/tool text.
+    ///
+    /// ``tiktoken_safe=True`` reproduces legacy tiktoken tokenizer chunking
+    /// for token-ID parity. fastokens itself does not need that chunking for
+    /// robustness; leave it disabled for whole-segment BPE encoding.
     #[pyo3(signature = (segments, add_special_tokens = false, tiktoken_safe = false))]
     fn encode_segments(
         &self,

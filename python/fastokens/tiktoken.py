@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Iterable, NamedTuple
 from urllib.parse import urlparse
 
 DEFAULT_TIKTOKEN_PATTERN = (

@@ -309,7 +309,12 @@ class _TokenizerShim:
         add_special_tokens: bool = False,
         tiktoken_safe: bool = False,
     ) -> Encoding:
-        """Encode ``(text, allow_special)`` segments in one backend call."""
+        """Encode ``(text, allow_special)`` segments in one backend call.
+
+        ``tiktoken_safe=True`` reproduces legacy tiktoken tokenizer chunking
+        for token-ID parity. fastokens itself does not need that chunking for
+        robustness; leave it disabled for whole-segment BPE encoding.
+        """
         return self._fast.encode_segments(
             segments,
             add_special_tokens=add_special_tokens,

@@ -366,9 +366,11 @@ impl Tokenizer {
     ///
     /// This splits every segment into at most 400k-character chunks and further
     /// splits very long whitespace/non-whitespace runs at 25k characters before
-    /// BPE encoding. These artificial boundaries affect BPE merges, so callers
-    /// migrating from custom tiktoken tokenizers need this path for exact parity
-    /// on very long inputs.
+    /// BPE encoding. Legacy tiktoken tokenizers use those limits to avoid
+    /// tiktoken regex pre-tokenizer panics/pathologies. fastokens does not need
+    /// them for robustness, but the artificial boundaries affect BPE merges, so
+    /// callers migrating from those tokenizers need this path for exact parity on
+    /// very long inputs.
     pub fn encode_segments_tiktoken_safe<I, S>(
         &self,
         segments: I,
@@ -381,8 +383,20 @@ impl Tokenizer {
         let mut ids = Vec::new();
         for (text, allow_special) in segments {
             let text = text.as_ref();
-            for chunk in tiktoken_safe_chunks(text) {
-                ids.extend(self.encode_without_post_process(chunk, false, !allow_special)?);
+            let chunks = tiktoken_safe_chunks(text);
+            if chunks.len() <= 1 {
+                for chunk in chunks {
+                    ids.extend(self.encode_without_post_process(chunk, false, !allow_special)?);
+                }
+                continue;
+            }
+
+            let chunk_ids = chunks
+                .par_iter()
+                .map(|chunk| self.encode_without_post_process(chunk, false, !allow_special))
+                .collect::<Result<Vec<_>, _>>()?;
+            for mut chunk_ids in chunk_ids {
+                ids.append(&mut chunk_ids);
             }
         }
         Ok(self.post_process(ids, add_special_tokens))
