@@ -793,7 +793,9 @@ fn tiktoken_safe_chunks(text: &str) -> Vec<&str> {
     let mut current_slice_is_space = false;
     let mut have_run = false;
 
-    for (idx, char) in text.char_indices() {
+    let bytes = text.as_bytes();
+    let mut idx = 0;
+    while idx < text.len() {
         if outer_chars == TIKTOKEN_MAX_ENCODE_CHARS {
             if slice_start < idx {
                 chunks.push(&text[slice_start..idx]);
@@ -804,7 +806,17 @@ fn tiktoken_safe_chunks(text: &str) -> Vec<&str> {
             have_run = false;
         }
 
-        let is_now_space = char.is_whitespace();
+        let byte = bytes[idx];
+        let (is_now_space, char_len) = if byte.is_ascii() {
+            (is_ascii_whitespace(byte), 1)
+        } else {
+            let char = text[idx..]
+                .chars()
+                .next()
+                .expect("idx is on a UTF-8 boundary");
+            (char.is_whitespace(), char.len_utf8())
+        };
+
         if !have_run {
             current_slice_len = 1;
             current_slice_is_space = is_now_space;
@@ -823,6 +835,7 @@ fn tiktoken_safe_chunks(text: &str) -> Vec<&str> {
             }
         }
         outer_chars += 1;
+        idx += char_len;
     }
     if slice_start < text.len() {
         chunks.push(&text[slice_start..]);
