@@ -36,7 +36,12 @@ use self::{
     pre_tokenized::{PreTokenizedString, Split as PtSplit},
 };
 
+// Upper bound a single tiktoken `encode` call can handle without the regex
+// pre-tokenizer panicking across the pyo3 boundary (`pyo3_runtime.
+// PanicException`). Legacy tiktoken tokenizers chunk inputs at this size.
 const TIKTOKEN_MAX_ENCODE_CHARS: usize = 400_000;
+// Guard against catastrophic backtracking in tiktoken's regex on very long
+// whitespace or non-whitespace runs (tiktoken issue #195).
 const TIKTOKEN_MAX_CONSECUTIVE_WHITESPACE_OR_NONWHITESPACE_CHARS: usize = 25_000;
 
 #[cfg(feature = "hf-hub")]
